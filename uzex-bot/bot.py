@@ -67,7 +67,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         t = asyncio.create_task(_typing(ctx.bot, chat_id, stop))
         try:
             text, HISTORY[chat_id] = await asyncio.wait_for(
-                agent.answer(q, HISTORY.get(chat_id, [])), timeout=75)
+                agent.answer(q, HISTORY.get(chat_id, [])), timeout=100)
         except asyncio.TimeoutError:
             text = agent.ERR_MSG
         finally:
@@ -90,6 +90,8 @@ class Page(BaseHTTPRequestHandler):
                 f"<p><a href='{link}' style='font-size:1.2em'>Open in Telegram → @{BOT_USERNAME}</a></p></body>").encode()
         self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
         self.wfile.write(html)
+    def do_HEAD(self):
+        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
     def log_message(self, *a): pass
 
 def run_web():

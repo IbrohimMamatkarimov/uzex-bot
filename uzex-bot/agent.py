@@ -134,7 +134,8 @@ Direct answer first (with the exact figure), then at most 2 short lines (assumpt
 _API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _client = genai.Client(api_key=_API_KEY) if _API_KEY else None
 MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-3.6-flash",
-                      "gemini-3.5-flash-lite", "gemini-2.5-flash"] if m]
+                      "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-preview",
+                      "gemini-4-argon"] if m]
 _model_idx = 0
 _SYSTEM = None
 
@@ -146,46 +147,47 @@ _TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
         required=["query"]))])
 
 async def _generate(contents):
+    """Try models in rotation: on overload/timeout/404 move straight to the next model."""
     global _model_idx
     cfg = types.GenerateContentConfig(
         system_instruction=_SYSTEM, tools=[_TOOL], temperature=0.1,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
     last = None
-    for attempt in range(4):
-        model = MODELS[min(_model_idx, len(MODELS) - 1)]
+    n = len(MODELS)
+    for attempt in range(n * 2):
+        idx = (_model_idx + attempt) % n
+        model = MODELS[idx]
         try:
-            return await asyncio.wait_for(
-                _client.aio.models.generate_content(model=model, contents=contents, config=cfg), timeout=30)
+            resp = await asyncio.wait_for(
+                _client.aio.models.generate_content(model=model, contents=contents, config=cfg), timeout=20)
+            _model_idx = idx                      # remember the model that works
+            return resp
         except Exception as e:
             last = e
             msg = f"{type(e).__name__}: {e}"
-            log.warning("Gemini error (model=%s, attempt=%d): %s", model, attempt + 1, msg[:300])
-            if ("404" in msg or "NOT_FOUND" in msg or "not found" in msg.lower()
-                    or "400" in msg or "INVALID_ARGUMENT" in msg) and _model_idx < len(MODELS) - 1:
-                _model_idx += 1
-                continue
-            if isinstance(e, asyncio.TimeoutError) and _model_idx < len(MODELS) - 1:
-                _model_idx += 1
-                continue
-            if any(x in msg for x in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500")):
-                await asyncio.sleep(2)
-                continue
-            raise
+            log.warning("Gemini error (model=%s): %s", model, msg[:200])
+            if attempt >= n - 1:
+                await asyncio.sleep(1)
+            continue
     raise last
 
 async def diagnose() -> str:
-    """Used by /test: shows the exact Gemini error (or success) in the chat."""
+    """Used by /test: tests every model in parallel, shows result, and picks the first that works."""
+    global _model_idx
     if _client is None:
         return "GEMINI_API_KEY is NOT set in Render environment."
-    out = []
-    for m in MODELS:
+    async def one(m):
         try:
-            r = await asyncio.wait_for(_client.aio.models.generate_content(model=m, contents="Say OK"), timeout=25)
-            out.append(f"OK  {m}: {(r.text or '')[:20]}")
-            break
+            r = await asyncio.wait_for(_client.aio.models.generate_content(model=m, contents="Say OK"), timeout=20)
+            return f"OK  {m}"
         except Exception as e:
-            out.append(f"ERR {m}: {type(e).__name__}: {str(e)[:160]}")
-    return "\n".join(out)
+            return f"ERR {m}: {type(e).__name__} {str(e)[:70]}"
+    res = await asyncio.gather(*(one(m) for m in MODELS))
+    for i, r in enumerate(res):
+        if r.startswith("OK"):
+            _model_idx = i
+            break
+    return "\n".join(res)
 
 ERR_MSG = ("Kechirasiz, hozir texnik muammo bor. Iltimos, savolni bir ozdan keyin qayta yuboring.\n"
            "Извините, сейчас техническая неполадка. Пожалуйста, повторите вопрос чуть позже.")
