@@ -42,7 +42,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME)
 
 async def test_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Testing Gemini...")
+    await update.message.reply_text("Gemini ulanishi tekshirilmoqda… / Проверяю подключение Gemini…")
     await update.message.reply_text(await agent.diagnose())
 
 async def _typing(bot, chat_id, stop: asyncio.Event):
@@ -73,14 +73,14 @@ def footer(lang: str, n_sql: int, secs: float) -> str:
         return f"📒 Реестр UZEX · 500 000 сделок · 🛡 проверено {n_sql} запр. · ⚡ {s} с"
     return f"📒 UZEX reyestri · 500 000 bitim · 🛡 {n_sql} ta so‘rov bilan tekshirildi · ⚡ {s} s"
 
-def keyboard(key: str, lang: str, sqls: list):
+def keyboard(key: str, lang: str, sqls: list, chartable: bool = False):
     if not sqls:
         return None
     ru = lang == "ru"
-    # chart button is always shown: checking it here re-ran every SQL query and froze the bot for seconds
     row = [InlineKeyboardButton("\U0001f4da Источник" if ru else "\U0001f4da Manba", callback_data=f"src:{key}"),
-           InlineKeyboardButton("\U0001f4e5 Excel", callback_data=f"xls:{key}"),
-           InlineKeyboardButton("\U0001f4ca График" if ru else "\U0001f4ca Diagramma", callback_data=f"cht:{key}")]
+           InlineKeyboardButton("\U0001f4e5 Excel", callback_data=f"xls:{key}")]
+    if chartable:
+        row.append(InlineKeyboardButton("\U0001f4ca График" if ru else "\U0001f4ca Diagramma", callback_data=f"cht:{key}"))
     return InlineKeyboardMarkup([row])
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -89,7 +89,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     q = msg.text.strip()[:1500]
-    status = await msg.reply_text("Checking your question…")
+    lang = detect_lang(q)
+    status_text = "Savolingiz tekshirilmoqda…" if lang == "uz" else "Проверяю ваш вопрос…"
+    status = await msg.reply_text(status_text)
     lock = LOCKS.setdefault(chat_id, asyncio.Lock())
     async with lock:                       # one question at a time per chat, many chats in parallel
         t0 = time.time()
@@ -104,7 +106,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         finally:
             stop.set(); await t
         secs = time.time() - t0
-    lang = detect_lang(q)
+    if text == agent.ERR_MSG:
+        text = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
+                "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
     kb = None
     if sqls:
         key = f"{chat_id}_{msg.message_id}"
@@ -112,7 +116,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         while len(TRACES) > 300:
             TRACES.popitem(last=False)
         text = f"{text}\n\n{footer(lang, len(sqls), secs)}"
-        kb = keyboard(key, lang, sqls)
+        kb = keyboard(key, lang, sqls, chartable=extras.can_chart(sqls))
     chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
     for i, ch in enumerate(chunks):
         if i == 0:
@@ -158,11 +162,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             buf = await asyncio.wait_for(asyncio.to_thread(
                 extras.build_excel, sqls, entry["question"], entry.get("answer", ""), lang), timeout=60)
             if not buf:
-                await ctx.bot.send_message(chat_id, "Excel uchun ma’lumot topilmadi. / Нет данных для Excel.",
+                no_data = "Excel yaratish uchun ma’lumot topilmadi." if not ru else "Нет данных для создания Excel-файла."
+                await ctx.bot.send_message(chat_id, no_data,
                                            reply_parameters=_reply_to(qmsg))
                 return
-            cap = ("⬇️ Excel: лист «Ответ» — вопрос и ответ, «Результат 1…» — данные, «SQL» — точные запросы" if ru else
-                   "⬇️ Excel: «Javob» varag‘i — savol va javob, «Natija 1…» — ma’lumotlar, «SQL» — aniq so‘rovlar")
+            cap = ("📥 Excel: «Сводка» — вопрос, ответ и обзор; «Результат 1…» — таблицы; «SQL» — запросы." if ru else
+                   "📥 Excel: «Hisobot» — savol, javob va xulosa; «Natija 1…» — jadvallar; «SQL» — so‘rovlar.")
             await ctx.bot.send_document(chat_id, buf, filename=f"uzex_{key.split('_')[-1]}.xlsx",
                                         caption=cap, reply_parameters=_reply_to(qmsg))
 
@@ -175,8 +180,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not buf:
                 await ctx.bot.send_message(
                     chat_id,
-                    "Для этого ответа график не нужен: результат — одно число или не таблица." if ru else
-                    "Bu javob uchun diagramma kerak emas: natija bitta raqam yoki jadval emas.",
+                    "Для диаграммы нужны как минимум две строки и числовой столбец. В этом ответе таких данных нет." if ru else
+                    "Diagramma tuzish uchun kamida ikki qator va sonli ustun kerak. Bu javobda bunday ma’lumot yo‘q.",
                     reply_parameters=_reply_to(qmsg))
                 return
             cap = "🖼 График по тем же данным, что и в ответе" if ru else "🖼 Javob bilan bir xil ma’lumotlar bo‘yicha diagramma"
@@ -184,7 +189,11 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         log.exception("button %s failed", kind)
         try:
-            await ctx.bot.send_message(chat_id, agent.ERR_MSG)
+            failure = (("Excel faylini yaratishda xatolik yuz berdi. Qayta urinib ko‘ring." if not ru else
+                        "Не удалось создать файл Excel. Попробуйте ещё раз.") if kind == "xls" else
+                       ("Diagramma yaratishda xatolik yuz berdi. Qayta urinib ko‘ring." if not ru else
+                        "Не удалось создать диаграмму. Попробуйте ещё раз."))
+            await ctx.bot.send_message(chat_id, failure)
         except Exception:
             pass
     finally:
@@ -194,8 +203,10 @@ async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled error", exc_info=ctx.error)
 
 async def on_other(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Iltimos, savolni matn ko‘rinishida yozing. / Пожалуйста, напишите вопрос текстом.")
+    source = update.message.caption or ""
+    lang = detect_lang(source)
+    prompt = "Savolingizni matn ko‘rinishida yuboring." if lang == "uz" else "Пожалуйста, отправьте вопрос текстом."
+    await update.message.reply_text(prompt)
 
 # ---- tiny web page + health check (Render/Railway need an open port; judges can open it too)
 class Page(BaseHTTPRequestHandler):
