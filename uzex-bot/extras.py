@@ -1,7 +1,7 @@
 """Excel (XLSX), chart (PNG) and source text, all built from the SQL queries the agent used.
 
 Excel file layout (clear for the user):
-  sheet 1  "Javob" / "Ответ"      -> the question, the bot's answer, date, how many rows each sheet has
+  sheet 1  "Hisobot" / "Сводка"   -> the question, answer, source, and result-sheet summary
   sheet 2+ "Natija 1", ...        -> the data table of each SQL query (nice headers, number formats, filter)
   last     "SQL"                  -> the exact SQL queries, so everything can be re-checked
 """
@@ -13,6 +13,7 @@ from matplotlib.ticker import FuncFormatter
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 import agent
 
@@ -83,10 +84,10 @@ def _clean(v):
 def pick_chartable(sqls):
     """Latest query that returns 2..40 rows, one label column and at least one numeric column."""
     for q in reversed(sqls):
-        try:
-            cols, rows = agent.exec_rows(q, 60)
-        except Exception:
+        cached = agent.cached_rows(q)
+        if cached is None:
             continue
+        cols, rows = cached
         if not (2 <= len(rows) <= 40):
             continue
         num_idx = [i for i in range(len(cols)) if all(_num(r[i]) or r[i] is None for r in rows)
@@ -164,6 +165,7 @@ def build_chart(sqls, title, lang="uz"):
 # ------------------------------------------------------------------ excel
 _HEAD_FONT = Font(bold=True, color="FFFFFF")
 _HEAD_FILL = PatternFill("solid", fgColor="2563EB")
+_ALT_FILL = PatternFill("solid", fgColor="F3F7FC")
 _THIN = Side(style="thin", color="D1D5DB")
 
 def _write_sheet(ws, cols, rows, lang):
@@ -176,6 +178,10 @@ def _write_sheet(ws, cols, rows, lang):
         for j, v in enumerate(r, 1):
             v = _clean(v)
             cell = ws.cell(row=i, column=j, value=v)
+            if i % 2 == 0:
+                cell.fill = _ALT_FILL
+            cell.border = Border(bottom=_THIN)
+            cell.alignment = Alignment(vertical="top", wrap_text=isinstance(v, str) and len(v) > 36)
             if isinstance(v, str) and v[:1] in ("=", "+", "@"):
                 cell.data_type = "s"              # never let text turn into an Excel formula
     for j, c in enumerate(cols, 1):
@@ -207,7 +213,10 @@ def build_excel(sqls, question="", answer="", lang="uz"):
     ru = lang == "ru"
     wb = Workbook()
     info = wb.active
-    info.title = "Ответ" if ru else "Javob"
+    info.title = "Сводка" if ru else "Hisobot"
+    wb.properties.title = "UZEX deal registry report"
+    wb.properties.subject = question[:250]
+    wb.properties.creator = "UZEX AI Assistant"
     results = []                                   # (sheet name, n rows, truncated)
     seen = set()
     n = 0
@@ -230,7 +239,22 @@ def build_excel(sqls, question="", answer="", lang="uz"):
     if not n:
         return None
 
-    # --- info sheet
+    # --- readable overview sheet
+    info.sheet_view.showGridLines = False
+    info.merge_cells("A1:B1")
+    title = info["A1"]
+    title.value = "UZEX — ОТЧЁТ ПО СДЕЛКАМ" if ru else "UZEX — BITIMLAR HISOBOTI"
+    title.font = Font(bold=True, size=18, color="FFFFFF")
+    title.fill = PatternFill("solid", fgColor="17365D")
+    title.alignment = Alignment(vertical="center")
+    info.row_dimensions[1].height = 38
+    info.merge_cells("A2:B2")
+    subtitle = info["A2"]
+    subtitle.value = ("Данные из реестра UZEX. Ниже — сводка, результаты и SQL-запросы." if ru else
+                      "UZEX reyestridan olingan ma’lumotlar. Quyida qisqacha xulosa, natijalar va SQL so‘rovlari berilgan.")
+    subtitle.font = Font(italic=True, color="475569", size=10)
+    subtitle.alignment = Alignment(wrap_text=True, vertical="center")
+    info.row_dimensions[2].height = 32
     lines = [
         ("Вопрос" if ru else "Savol", question),
         ("Ответ бота" if ru else "Bot javobi", answer),
@@ -244,26 +268,47 @@ def build_excel(sqls, question="", answer="", lang="uz"):
             txt += (f" (показаны первые {EXCEL_ROW_LIMIT})" if ru else f" (dastlabki {EXCEL_ROW_LIMIT} tasi ko‘rsatilgan)")
         lines.append((name, txt))
     lines.append(("SQL", "Лист «SQL» — точные запросы" if ru else "«SQL» varag‘i — aniq so‘rovlar"))
-    info.column_dimensions["A"].width = 22
-    info.column_dimensions["B"].width = 110
-    for i, (k, v) in enumerate(lines, 1):
+    info.column_dimensions["A"].width = 25
+    info.column_dimensions["B"].width = 92
+    info.row_dimensions[3].height = 8
+    for i, (k, v) in enumerate(lines, 4):
         a = info.cell(row=i, column=1, value=k)
-        a.font = Font(bold=True); a.fill = PatternFill("solid", fgColor="DBEAFE")
+        a.font = Font(bold=True, color="17365D"); a.fill = PatternFill("solid", fgColor="DBEAFE")
         a.alignment = Alignment(vertical="top")
         b = info.cell(row=i, column=2, value=_clean(v) or "")
         b.alignment = Alignment(wrap_text=True, vertical="top")
+        a.border = Border(bottom=_THIN)
+        b.border = Border(bottom=_THIN)
+        estimated_lines = max(str(v).count("\n") + 1, (len(str(v)) + 89) // 90)
+        info.row_dimensions[i].height = min(360, max(24, 18 * estimated_lines))
         if isinstance(b.value, str) and b.value[:1] in ("=", "+", "@"):
             b.data_type = "s"
+    info.freeze_panes = "A4"
+    info.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    info.page_setup.fitToWidth = 1
+    info.page_setup.fitToHeight = 0
+    info.page_setup.orientation = "landscape"
 
     # --- SQL sheet
     ws = wb.create_sheet("SQL")
-    ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = 130
-    for i, q in enumerate(sqls, 1):
-        ws.cell(row=i, column=1, value=i).font = Font(bold=True)
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 120
+    for j, value in enumerate(("№", "SQL-запрос" if ru else "SQL so‘rovi"), 1):
+        cell = ws.cell(row=1, column=j, value=value)
+        cell.font, cell.fill = _HEAD_FONT, _HEAD_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 26
+    for i, q in enumerate(sqls, 2):
+        ws.cell(row=i, column=1, value=i - 1).font = Font(bold=True, color="17365D")
         c = ws.cell(row=i, column=2, value=_clean(q))
         c.alignment = Alignment(wrap_text=True, vertical="top")
+        c.border = Border(bottom=_THIN)
+        if i % 2 == 0:
+            c.fill = _ALT_FILL
+        ws.row_dimensions[i].height = min(90, max(30, 15 * (str(q).count("\n") + 1)))
         c.data_type = "s"
+    ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -275,3 +320,4 @@ def source_text(sqls, lang="uz"):
     head = "Ответ основан на этих SQL-запросах к реестру:" if lang == "ru" else "Javob quyidagi SQL so‘rovlarga asoslangan:"
     body = "\n\n".join(f"{i}) {q}" for i, q in enumerate(sqls[:5], 1))
     return f"{head}\n\n{body}"[:3900]
+
