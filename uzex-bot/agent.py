@@ -2,7 +2,8 @@
 
 Env: GEMINI_API_KEY, optional GEMINI_MODEL
 """
-import os, re, asyncio, threading, logging
+import os, re, time, asyncio, threading, logging
+from collections import OrderedDict
 import duckdb
 from google import genai
 from google.genai import types
@@ -11,7 +12,7 @@ log = logging.getLogger("agent")
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 MAX_ROWS = 40          # rows returned to the model per query
-MAX_STEPS = 8          # max tool calls per question
+MAX_STEPS = 5          # max tool calls per question
 QUERY_TIMEOUT = 20     # seconds
 
 # ------------------------------------------------------------------ database
@@ -100,6 +101,8 @@ You answer questions from users in UZBEK and RUSSIAN by querying the registry wi
 5. State the key assumption in one short phrase (period, whether cancelled deals were excluded, currency/unit). Data covers {mn} to {mx}; "this year" = 2026 is partial (up to 30.10.2026).
 6. Style: concise, plain text only (NO markdown tables, NO ** or #). Short lines or a simple "1) 2) 3)" list. Put the direct answer first, then 1-2 lines of context. Format numbers with spaces as thousand separators and 1-2 decimals; for large sums use mlrd / trln (Uzbek: so‘m, mlrd, trln) or млрд / трлн (Russian: сум).
 
+7. SPEED: be fast. Write ONE complete SQL query (use CTEs / GROUP BY / FILTER) that answers the whole question, then answer right away. Use at most 2 queries unless one failed. If a question needs several numbers, get them in a single query or call run_sql several times IN PARALLEL in the same turn.
+
 # DATABASE (DuckDB). Prefer the wide table deals_full - it already has everything joined.
 deals_full (500 000 rows, one row = one deal):
  deal_id, deal_date DATE, year, month, quarter, deal_time,
@@ -154,7 +157,8 @@ MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemin
                       "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-preview",
                       "gemini-4-argon"] if m]
 _model_idx = 0
-_SYSTEM = None
+_SYSTEM = build_system_prompt()     # built ONCE at startup, so the first question is not slow
+_CACHE: "OrderedDict[str, tuple]" = OrderedDict()   # same first question -> instant answer
 
 _TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
     name="run_sql",
@@ -163,28 +167,61 @@ _TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
         "query": types.Schema(type="STRING", description="A single DuckDB SELECT / WITH statement.")},
         required=["query"]))])
 
+GEN_TIMEOUT = 12      # seconds to wait for ONE Gemini call before trying the next model
+_BAD = set()          # models that returned 404 / not found -> never try again
+_THINK = ["level", "budget", "none"]   # thinking styles, we drop to the next one if the API rejects it
+
+def _thinking():
+    """Make Gemini think as little as possible: thinking is the #1 cause of slow answers."""
+    m = _THINK[0]
+    if m == "level":
+        return types.ThinkingConfig(thinking_level="low")
+    if m == "budget":
+        return types.ThinkingConfig(thinking_budget=128)
+    return None
+
+async def _call(model, contents):
+    for _ in range(3):
+        try:
+            cfg = types.GenerateContentConfig(
+                system_instruction=_SYSTEM, tools=[_TOOL], temperature=0.1,
+                thinking_config=_thinking(),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+            return await asyncio.wait_for(
+                _client.aio.models.generate_content(model=model, contents=contents, config=cfg),
+                timeout=GEN_TIMEOUT)
+        except Exception as e:
+            if "thinking" in str(e).lower() and len(_THINK) > 1:
+                _THINK.pop(0)                  # this thinking style is not supported -> try the next one
+                continue
+            raise
+    raise RuntimeError("thinking config failed")
+
 async def _generate(contents):
     """Try models in rotation: on overload/timeout/404 move straight to the next model."""
     global _model_idx
-    cfg = types.GenerateContentConfig(
-        system_instruction=_SYSTEM, tools=[_TOOL], temperature=0.1,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
     last = None
     n = len(MODELS)
     for attempt in range(n * 2):
         idx = (_model_idx + attempt) % n
         model = MODELS[idx]
+        if model in _BAD and len(_BAD) < n:
+            continue
+        t0 = time.time()
         try:
-            resp = await asyncio.wait_for(
-                _client.aio.models.generate_content(model=model, contents=contents, config=cfg), timeout=20)
+            resp = await _call(model, contents)
             _model_idx = idx                      # remember the model that works
+            log.info("Gemini %s took %.1fs", model, time.time() - t0)
             return resp
         except Exception as e:
             last = e
             msg = f"{type(e).__name__}: {e}"
-            log.warning("Gemini error (model=%s): %s", model, msg[:200])
+            log.warning("Gemini error (model=%s, %.1fs): %s", model, time.time() - t0, msg[:200])
+            low = msg.lower()
+            if "404" in low or "not_found" in low or "not found" in low:
+                _BAD.add(model)
             if attempt >= n - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
             continue
     raise last
 
@@ -214,6 +251,11 @@ async def answer(question: str, history: list) -> tuple[str, list, list]:
     global _SYSTEM
     if _SYSTEM is None:
         _SYSTEM = build_system_prompt()
+    ckey = re.sub(r"\s+", " ", question.strip().lower())
+    if not history and ckey in _CACHE:               # data never changes -> reuse the answer
+        text, trace = _CACHE[ckey]
+        log.info("cache hit")
+        return text, [(question, text)], list(trace)
     contents = []
     for u, m in history[-4:]:
         contents.append(types.Content(role="user", parts=[types.Part(text=u)]))
@@ -232,11 +274,14 @@ async def answer(question: str, history: list) -> tuple[str, list, list]:
             if not calls:
                 text = "".join(p.text for p in (content.parts or []) if getattr(p, "text", None)).strip()
                 break
-            parts = []
-            for fc in calls:
+            async def _run(fc):
                 q = (fc.args or {}).get("query", "")
-                log.info("SQL> %s", q.replace("\n", " ")[:300])
+                t1 = time.time()
                 res = await asyncio.to_thread(run_sql, q)
+                log.info("SQL (%.1fs)> %s", time.time() - t1, q.replace("\n", " ")[:300])
+                return fc, q, res
+            parts = []
+            for fc, q, res in await asyncio.gather(*(_run(fc) for fc in calls)):   # all queries at the same time
                 if not res.startswith(("ERROR", "OK: 0 rows")):
                     trace.append(q.strip().rstrip(";"))
                 parts.append(types.Part.from_function_response(name=fc.name, response={"result": res}))
@@ -252,4 +297,8 @@ async def answer(question: str, history: list) -> tuple[str, list, list]:
         return ERR_MSG, history, []
     if not text:
         return ERR_MSG, history, []
+    if not history and trace:
+        _CACHE[ckey] = (text, list(trace))
+        while len(_CACHE) > 200:
+            _CACHE.popitem(last=False)
     return text, (history + [(question, text)])[-6:], trace

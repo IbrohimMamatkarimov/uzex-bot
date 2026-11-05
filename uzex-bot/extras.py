@@ -1,14 +1,53 @@
-"""Chart (PNG), Excel (XLSX) and source text built from the SQL queries the agent used."""
-import io, re, datetime, decimal
+"""Excel (XLSX), chart (PNG) and source text, all built from the SQL queries the agent used.
+
+Excel file layout (clear for the user):
+  sheet 1  "Javob" / "Ответ"      -> the question, the bot's answer, date, how many rows each sheet has
+  sheet 2+ "Natija 1", ...        -> the data table of each SQL query (nice headers, number formats, filter)
+  last     "SQL"                  -> the exact SQL queries, so everything can be re-checked
+"""
+import io, re, math, textwrap, datetime, decimal
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 import agent
 
-TIME_COLS = {"year", "month", "quarter", "deal_date", "date", "yil", "год", "oy"}
+EXCEL_ROW_LIMIT = 5000
+MAX_SHEETS = 6
+TIME_COLS = {"year", "month", "quarter", "deal_date", "date", "yil", "год", "oy", "month_num", "period"}
+NO_FORMAT_HINTS = ("inn", "id", "code", "hs", "year", "yil", "month", "quarter", "phone", "rank")
+
+# column name -> (Uzbek header, Russian header). Unknown names are kept as they are.
+LABELS = {
+    "commodity": ("Tovar", "Товар"), "commodity_uz": ("Tovar (o‘zbekcha)", "Товар (узб.)"),
+    "category": ("Kategoriya", "Категория"), "product_group": ("Mahsulot guruhi", "Группа товаров"),
+    "industry": ("Tarmoq", "Отрасль"), "region": ("Hudud", "Регион"), "region_ru": ("Hudud (ruscha)", "Регион (рус.)"),
+    "year": ("Yil", "Год"), "month": ("Oy", "Месяц"), "quarter": ("Chorak", "Квартал"),
+    "deal_date": ("Bitim sanasi", "Дата сделки"), "status": ("Holat", "Статус"), "unit": ("O‘lchov birligi", "Ед. изм."),
+    "deals": ("Bitimlar soni", "Количество сделок"), "deal_count": ("Bitimlar soni", "Количество сделок"),
+    "n_deals": ("Bitimlar soni", "Количество сделок"), "num_deals": ("Bitimlar soni", "Количество сделок"),
+    "count": ("Soni", "Количество"), "cnt": ("Soni", "Количество"),
+    "amount_uzs": ("Summa (so‘m)", "Сумма (сум)"), "total_uzs": ("Summa (so‘m)", "Сумма (сум)"),
+    "turnover": ("Aylanma (so‘m)", "Оборот (сум)"), "turnover_uzs": ("Aylanma (so‘m)", "Оборот (сум)"),
+    "amount_usd": ("Summa (USD)", "Сумма (USD)"), "total_usd": ("Summa (USD)", "Сумма (USD)"),
+    "volume_tonnes": ("Hajm (tonna)", "Объём (тонн)"), "volume_units": ("Hajm (birlik)", "Объём (ед.)"),
+    "unit_price_uzs": ("Narx (so‘m / birlik)", "Цена (сум / ед.)"), "avg_price": ("O‘rtacha narx", "Средняя цена"),
+    "avg_price_uzs": ("O‘rtacha narx (so‘m)", "Средняя цена (сум)"),
+    "seller_name": ("Sotuvchi", "Продавец"), "buyer_name": ("Xaridor", "Покупатель"),
+    "seller_inn": ("Sotuvchi STIR", "ИНН продавца"), "buyer_inn": ("Xaridor STIR", "ИНН покупателя"),
+    "seller_broker_name": ("Sotuvchi brokeri", "Брокер продавца"), "buyer_broker_name": ("Xaridor brokeri", "Брокер покупателя"),
+    "broker_name": ("Broker", "Брокер"), "pct": ("Ulush, %", "Доля, %"), "share_pct": ("Ulush, %", "Доля, %"),
+    "contract_type": ("Shartnoma turi", "Тип контракта"), "contract_form": ("Shartnoma shakli", "Форма контракта"),
+    "auction_type": ("Auksion turi", "Тип аукциона"),
+}
+
+def _label(col, lang):
+    hit = LABELS.get(str(col).lower())
+    return (hit[1] if lang == "ru" else hit[0]) if hit else str(col)
 
 def _num(v):
     return isinstance(v, (int, float, decimal.Decimal)) and not isinstance(v, bool)
@@ -20,10 +59,29 @@ def _human(v, lang):
     if a >= 1e9:  return f"{v/1e9:.2f} {sfx[1]}"
     if a >= 1e6:  return f"{v/1e6:.2f} {sfx[2]}"
     if a >= 1000: return f"{v:,.0f}".replace(",", " ")
-    return f"{v:.2f}".rstrip("0").rstrip(".")
+    return f"{v:.2f}".rstrip("0").rstrip(".") or "0"
 
+def _clean(v):
+    """Turn any database value into something Excel can always store (never raises)."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, decimal.Decimal):
+        v = float(v)
+    if isinstance(v, float):
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if isinstance(v, int):
+        return v if abs(v) < 10**15 else str(v)
+    if isinstance(v, datetime.datetime):
+        return v.replace(tzinfo=None)
+    if isinstance(v, (datetime.date, datetime.time, datetime.timedelta)):
+        return v
+    return ILLEGAL_CHARACTERS_RE.sub("", str(v))[:32000]
+
+# ------------------------------------------------------------------ chart
 def pick_chartable(sqls):
-    """Latest query that returns 2..40 rows and at least one numeric column."""
+    """Latest query that returns 2..40 rows, one label column and at least one numeric column."""
     for q in reversed(sqls):
         try:
             cols, rows = agent.exec_rows(q, 60)
@@ -36,8 +94,6 @@ def pick_chartable(sqls):
         if not num_idx:
             continue
         label_idx = next((i for i in range(len(cols)) if i not in num_idx), 0)
-        if label_idx in num_idx and len(num_idx) < 2:
-            continue
         val_idx = next((i for i in num_idx if i != label_idx), None)
         if val_idx is None:
             continue
@@ -48,67 +104,173 @@ def can_chart(sqls) -> bool:
     return pick_chartable(sqls) is not None
 
 def build_chart(sqls, title, lang="uz"):
+    """Returns a PNG BytesIO, or None when the data is not suitable for a chart."""
     pk = pick_chartable(sqls)
     if not pk:
         return None
     cols, rows, li, vi = pk
-    rows = [r for r in rows if r[vi] is not None][:12]
-    labels = [str(r[li])[:34] for r in rows]
+    rows = [r for r in rows if r[vi] is not None]
+    if len(rows) < 2:
+        return None
+    is_time = str(cols[li]).lower() in TIME_COLS
+    if is_time:
+        try:
+            rows.sort(key=lambda r: r[li])
+        except TypeError:
+            pass
+    else:
+        rows = rows[:12]
+    labels = [(r[li].strftime("%d.%m.%Y") if isinstance(r[li], datetime.date) else str(r[li]))[:34] for r in rows]
     vals = [float(r[vi]) for r in rows]
-    is_time = cols[li].lower() in TIME_COLS
-    fig, ax = plt.subplots(figsize=(8, max(3.6, 0.55 * len(rows) + 1.6)) if not is_time else (8, 4.4), dpi=130)
+    lo, hi = min(0.0, min(vals)), max(0.0, max(vals))
+    pad = (hi - lo) * 0.18 or 1.0
+    lims = (lo - (pad if lo < 0 else 0), hi + (pad if hi > 0 else 0))
     color = "#2563eb"
     if is_time:
+        fig, ax = plt.subplots(figsize=(max(8, 0.35 * len(rows) + 4), 4.6), dpi=130)
         bars = ax.bar(labels, vals, color=color)
-        ax.set_ylim(0, max(vals) * 1.15)
+        ax.set_ylim(*lims)
         for b, v in zip(bars, vals):
-            ax.annotate(_human(v, lang), (b.get_x() + b.get_width() / 2, v), ha="center", va="bottom", fontsize=7)
+            ax.annotate(_human(v, lang), (b.get_x() + b.get_width() / 2, v), ha="center",
+                        va="bottom" if v >= 0 else "top", fontsize=7)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: _human(v, lang)))
+        if len(rows) > 8:
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.set_ylabel(_label(cols[vi], lang), fontsize=8)
     else:
-        y = range(len(vals))
-        bars = ax.barh(list(y), vals, color=color)
-        ax.set_yticks(list(y)); ax.set_yticklabels(labels, fontsize=8); ax.invert_yaxis()
-        ax.set_xlim(0, max(vals) * 1.2)
+        fig, ax = plt.subplots(figsize=(8, max(3.6, 0.55 * len(rows) + 1.8)), dpi=130)
+        y = list(range(len(vals)))
+        bars = ax.barh(y, vals, color=color)
+        ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=8); ax.invert_yaxis()
+        ax.set_xlim(*lims)
         for b, v in zip(bars, vals):
-            ax.annotate(_human(v, lang), (v, b.get_y() + b.get_height() / 2), xytext=(4, 0),
-                        textcoords="offset points", va="center", fontsize=7)
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: _human(v, lang))) if not is_time else \
-        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: _human(v, lang)))
-    ax.set_title(title[:70], fontsize=10)
-    ax.set_xlabel(cols[vi] if not is_time else "", fontsize=8)
+            ax.annotate(_human(v, lang), (v, b.get_y() + b.get_height() / 2), xytext=(4 if v >= 0 else -4, 0),
+                        textcoords="offset points", va="center", ha="left" if v >= 0 else "right", fontsize=7)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: _human(v, lang)))
+        ax.set_xlabel(_label(cols[vi], lang), fontsize=8)
+    ax.set_title("\n".join(textwrap.wrap(title, 70)[:2]), fontsize=10)
     ax.tick_params(axis="x", labelsize=7)
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-    fig.text(0.99, 0.01, "UZEX reyestri · SQL bo‘yicha hisob", ha="right", fontsize=6, color="#888")
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    fig.text(0.99, 0.01, "Реестр UZEX · расчёт по SQL" if lang == "ru" else "UZEX reyestri · SQL bo‘yicha hisob",
+             ha="right", fontsize=6, color="#888")
     fig.tight_layout()
-    buf = io.BytesIO(); fig.savefig(buf, format="png"); plt.close(fig)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
     buf.seek(0)
     return buf
 
-def build_excel(sqls):
-    wb = Workbook(); wb.remove(wb.active)
+# ------------------------------------------------------------------ excel
+_HEAD_FONT = Font(bold=True, color="FFFFFF")
+_HEAD_FILL = PatternFill("solid", fgColor="2563EB")
+_THIN = Side(style="thin", color="D1D5DB")
+
+def _write_sheet(ws, cols, rows, lang):
+    for j, c in enumerate(cols, 1):
+        cell = ws.cell(row=1, column=j, value=_label(c, lang))
+        cell.font, cell.fill = _HEAD_FONT, _HEAD_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 32
+    for i, r in enumerate(rows, 2):
+        for j, v in enumerate(r, 1):
+            v = _clean(v)
+            cell = ws.cell(row=i, column=j, value=v)
+            if isinstance(v, str) and v[:1] in ("=", "+", "@"):
+                cell.data_type = "s"              # never let text turn into an Excel formula
+    for j, c in enumerate(cols, 1):
+        col_vals = [_clean(r[j - 1]) for r in rows[:200]]
+        sample = [v for v in col_vals if v is not None]
+        name = str(c).lower()
+        fmt = None
+        if sample and all(isinstance(v, datetime.datetime) for v in sample):
+            fmt = "DD.MM.YYYY HH:MM"
+        elif sample and all(isinstance(v, datetime.date) and not isinstance(v, datetime.datetime) for v in sample):
+            fmt = "DD.MM.YYYY"
+        elif sample and any(h in name for h in NO_FORMAT_HINTS):
+            fmt = None
+        elif sample and any(isinstance(v, float) for v in sample) and all(_num(v) for v in sample):
+            fmt = "# ##0.00"
+        elif sample and all(isinstance(v, int) and not isinstance(v, bool) for v in sample) and max(abs(v) for v in sample) >= 10000:
+            fmt = "# ##0"
+        if fmt:
+            for i in range(2, len(rows) + 2):
+                ws.cell(row=i, column=j).number_format = fmt
+        width = max([len(_label(c, lang))] + [len(str(v)) for v in sample[:200]] + [8]) + 3
+        ws.column_dimensions[get_column_letter(j)].width = min(width, 45)
+    ws.freeze_panes = "A2"
+    if rows:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{len(rows) + 1}"
+
+def build_excel(sqls, question="", answer="", lang="uz"):
+    """Returns an XLSX BytesIO, or None if none of the queries can be run."""
+    ru = lang == "ru"
+    wb = Workbook()
+    info = wb.active
+    info.title = "Ответ" if ru else "Javob"
+    results = []                                   # (sheet name, n rows, truncated)
+    seen = set()
     n = 0
-    for q in sqls[:6]:
+    for q in sqls:
+        if q in seen:
+            continue
+        seen.add(q)
+        if n >= MAX_SHEETS:
+            break
         try:
-            cols, rows = agent.exec_rows(q, 5000)
+            cols, rows = agent.exec_rows(q, EXCEL_ROW_LIMIT + 1)
         except Exception:
             continue
+        truncated = len(rows) > EXCEL_ROW_LIMIT
+        rows = rows[:EXCEL_ROW_LIMIT]
         n += 1
-        ws = wb.create_sheet(f"Natija {n}")
-        ws.append(cols)
-        for c in ws[1]:
-            c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="2563EB")
-        for r in rows:
-            ws.append([float(v) if isinstance(v, decimal.Decimal) else v for v in r])
-        for i, c in enumerate(cols, 1):
-            width = max([len(str(c))] + [len(str(r[i - 1])) for r in rows[:200]]) + 2
-            ws.column_dimensions[get_column_letter(i)].width = min(width, 50)
-        ws.freeze_panes = "A2"
-    ws = wb.create_sheet("SQL")
-    ws.column_dimensions["A"].width = 120
-    for q in sqls:
-        ws.append([q])
-    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-    return buf if n else None
+        name = f"{'Результат' if ru else 'Natija'} {n}"
+        _write_sheet(wb.create_sheet(name), cols, rows, lang)
+        results.append((name, len(rows), truncated))
+    if not n:
+        return None
 
+    # --- info sheet
+    lines = [
+        ("Вопрос" if ru else "Savol", question),
+        ("Ответ бота" if ru else "Bot javobi", answer),
+        ("Создано" if ru else "Yaratilgan vaqt", datetime.datetime.now().strftime("%d.%m.%Y %H:%M")),
+        ("Источник" if ru else "Manba", "Реестр сделок UZEX, 500 000 сделок (2022–2026)" if ru
+         else "UZEX bitimlar reyestri, 500 000 bitim (2022–2026)"),
+    ]
+    for name, cnt, trunc in results:
+        txt = f"{cnt} " + ("строк" if ru else "qator")
+        if trunc:
+            txt += (f" (показаны первые {EXCEL_ROW_LIMIT})" if ru else f" (dastlabki {EXCEL_ROW_LIMIT} tasi ko‘rsatilgan)")
+        lines.append((name, txt))
+    lines.append(("SQL", "Лист «SQL» — точные запросы" if ru else "«SQL» varag‘i — aniq so‘rovlar"))
+    info.column_dimensions["A"].width = 22
+    info.column_dimensions["B"].width = 110
+    for i, (k, v) in enumerate(lines, 1):
+        a = info.cell(row=i, column=1, value=k)
+        a.font = Font(bold=True); a.fill = PatternFill("solid", fgColor="DBEAFE")
+        a.alignment = Alignment(vertical="top")
+        b = info.cell(row=i, column=2, value=_clean(v) or "")
+        b.alignment = Alignment(wrap_text=True, vertical="top")
+        if isinstance(b.value, str) and b.value[:1] in ("=", "+", "@"):
+            b.data_type = "s"
+
+    # --- SQL sheet
+    ws = wb.create_sheet("SQL")
+    ws.column_dimensions["A"].width = 6
+    ws.column_dimensions["B"].width = 130
+    for i, q in enumerate(sqls, 1):
+        ws.cell(row=i, column=1, value=i).font = Font(bold=True)
+        c = ws.cell(row=i, column=2, value=_clean(q))
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        c.data_type = "s"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+# ------------------------------------------------------------------ source text
 def source_text(sqls, lang="uz"):
     head = "Ответ основан на этих SQL-запросах к реестру:" if lang == "ru" else "Javob quyidagi SQL so‘rovlarga asoslangan:"
     body = "\n\n".join(f"{i}) {q}" for i, q in enumerate(sqls[:5], 1))

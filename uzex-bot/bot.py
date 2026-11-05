@@ -7,7 +7,7 @@ import os, re, time, asyncio, threading, logging
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -76,10 +76,10 @@ def keyboard(key: str, lang: str, sqls: list):
     if not sqls:
         return None
     ru = lang == "ru"
+    # chart button is always shown: checking it here re-ran every SQL query and froze the bot for seconds
     row = [InlineKeyboardButton("🗂 Источник" if ru else "🗂 Manba", callback_data=f"src:{key}"),
-           InlineKeyboardButton("⬇️ Excel", callback_data=f"xls:{key}")]
-    if extras.can_chart(sqls):
-        row.append(InlineKeyboardButton("🖼 График" if ru else "🖼 Diagramma", callback_data=f"cht:{key}"))
+           InlineKeyboardButton("⬇️ Excel", callback_data=f"xls:{key}"),
+           InlineKeyboardButton("🖼 График" if ru else "🖼 Diagramma", callback_data=f"cht:{key}")]
     return InlineKeyboardMarkup([row])
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -96,7 +96,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sqls = []
         try:
             text, HISTORY[chat_id], sqls = await asyncio.wait_for(
-                agent.answer(q, HISTORY.get(chat_id, [])), timeout=100)
+                agent.answer(q, HISTORY.get(chat_id, [])), timeout=45)
         except asyncio.TimeoutError:
             text = agent.ERR_MSG
         finally:
@@ -106,7 +106,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = None
     if sqls:
         key = f"{chat_id}_{msg.message_id}"
-        TRACES[key] = {"sqls": sqls, "question": q, "qmsg": msg.message_id, "lang": lang}
+        TRACES[key] = {"sqls": sqls, "question": q, "qmsg": msg.message_id, "lang": lang, "answer": text}
         while len(TRACES) > 300:
             TRACES.popitem(last=False)
         text = f"{text}\n\n{footer(lang, len(sqls), secs)}"
@@ -115,42 +115,78 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for i, ch in enumerate(chunks):
         await msg.reply_text(ch, reply_markup=kb if i == len(chunks) - 1 else None)
 
+BUSY: set = set()      # buttons being processed right now (ignore double taps)
+
+def _reply_to(msg_id):
+    """Reply to the user's question, and do NOT fail if that message was deleted."""
+    return ReplyParameters(message_id=msg_id, allow_sending_without_reply=True)
+
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
-    await cq.answer()
     kind, _, key = (cq.data or "").partition(":")
     entry = TRACES.get(key)
-    chat_id = cq.message.chat_id
+    chat_id = cq.message.chat_id if cq.message else cq.from_user.id
+    lang = entry["lang"] if entry else "uz"
+    ru = lang == "ru"
+
+    toast = {"src": "🗂", "xls": "⏳ Готовлю Excel…" if ru else "⏳ Excel tayyorlanmoqda…",
+             "cht": "⏳ Рисую график…" if ru else "⏳ Diagramma chizilmoqda…"}.get(kind, "")
+    try:
+        await cq.answer(toast)                      # small popup, so the user sees that the tap worked
+    except Exception:
+        pass
+
     if not entry:
         await ctx.bot.send_message(chat_id, "Bu javob eskirgan, savolni qayta bering. / Ответ устарел, задайте вопрос заново.")
         return
-    lang, sqls, qmsg = entry["lang"], entry["sqls"], entry["qmsg"]
+    busy_key = f"{kind}:{key}"
+    if busy_key in BUSY:                            # already working on this exact button
+        return
+    BUSY.add(busy_key)
+    sqls, qmsg = entry["sqls"], entry["qmsg"]
     try:
         if kind == "src":
-            await ctx.bot.send_message(chat_id, extras.source_text(sqls, lang), reply_to_message_id=qmsg)
+            await ctx.bot.send_message(chat_id, extras.source_text(sqls, lang), reply_parameters=_reply_to(qmsg))
+
         elif kind == "xls":
             await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
-            buf = await asyncio.to_thread(extras.build_excel, sqls)
+            buf = await asyncio.wait_for(asyncio.to_thread(
+                extras.build_excel, sqls, entry["question"], entry.get("answer", ""), lang), timeout=60)
             if not buf:
-                await ctx.bot.send_message(chat_id, "Excel uchun ma’lumot yo‘q. / Нет данных для Excel.")
+                await ctx.bot.send_message(chat_id, "Excel uchun ma’lumot topilmadi. / Нет данных для Excel.",
+                                           reply_parameters=_reply_to(qmsg))
                 return
-            cap = "⬇️ Данные, на которых основан ответ (именно эти запросы)" if lang == "ru" else "⬇️ Javob tayangan ma’lumotlar (aynan shu so‘rovlar)"
+            cap = ("⬇️ Excel: лист «Ответ» — вопрос и ответ, «Результат 1…» — данные, «SQL» — точные запросы" if ru else
+                   "⬇️ Excel: «Javob» varag‘i — savol va javob, «Natija 1…» — ma’lumotlar, «SQL» — aniq so‘rovlar")
             await ctx.bot.send_document(chat_id, buf, filename=f"uzex_{key.split('_')[-1]}.xlsx",
-                                        caption=cap, reply_to_message_id=qmsg)
+                                        caption=cap, reply_parameters=_reply_to(qmsg))
+
         elif kind == "cht":
             await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
             def make():
                 with _plot_lock:
                     return extras.build_chart(sqls, entry["question"], lang)
-            buf = await asyncio.to_thread(make)
+            buf = await asyncio.wait_for(asyncio.to_thread(make), timeout=60)
             if not buf:
-                await ctx.bot.send_message(chat_id, "Diagramma uchun ma’lumot yetarli emas. / Недостаточно данных для графика.")
+                await ctx.bot.send_message(
+                    chat_id,
+                    "Для этого ответа график не нужен: результат — одно число или не таблица." if ru else
+                    "Bu javob uchun diagramma kerak emas: natija bitta raqam yoki jadval emas.",
+                    reply_parameters=_reply_to(qmsg))
                 return
-            cap = "🖼 График по тем же данным, что и в ответе" if lang == "ru" else "🖼 Javob bilan bir xil ma’lumotlar bo‘yicha diagramma"
-            await ctx.bot.send_photo(chat_id, buf, caption=cap, reply_to_message_id=qmsg)
+            cap = "🖼 График по тем же данным, что и в ответе" if ru else "🖼 Javob bilan bir xil ma’lumotlar bo‘yicha diagramma"
+            await ctx.bot.send_photo(chat_id, buf, caption=cap, reply_parameters=_reply_to(qmsg))
     except Exception:
-        log.exception("button failed")
-        await ctx.bot.send_message(chat_id, agent.ERR_MSG)
+        log.exception("button %s failed", kind)
+        try:
+            await ctx.bot.send_message(chat_id, agent.ERR_MSG)
+        except Exception:
+            pass
+    finally:
+        BUSY.discard(busy_key)
+
+async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled error", exc_info=ctx.error)
 
 async def on_other(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -174,14 +210,22 @@ class Page(BaseHTTPRequestHandler):
 def run_web():
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Page).serve_forever()
 
+async def warm(app):
+    """At startup: open the Gemini connection and pick a working model, so the first user is not slow."""
+    try:
+        log.info("warmup:\n%s", await agent.diagnose())
+    except Exception:
+        log.exception("warmup failed")
+
 def main():
     threading.Thread(target=run_web, daemon=True).start()
-    app = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    app = Application.builder().token(TOKEN).concurrent_updates(True).post_init(warm).build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_other))
+    app.add_error_handler(on_error)
     log.info("bot started")
     app.run_polling(drop_pending_updates=True)
 
