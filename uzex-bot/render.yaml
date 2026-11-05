@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: uzex-ai-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.7
