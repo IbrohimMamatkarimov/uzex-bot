@@ -7,7 +7,8 @@ import os, re, time, asyncio, threading, logging
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters,
+                      ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton, BotCommand)
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -39,7 +40,45 @@ LOCKS: dict[int, asyncio.Lock] = {}
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     HISTORY.pop(update.effective_chat.id, None)
-    await update.message.reply_text(WELCOME)
+    await update.message.reply_text(WELCOME + "\n\nMisollar: /examples · Suhbatni tozalash: /clear")
+
+EXAMPLE_QUESTIONS = [
+    "2025-yilda eng ko‘p savdo qilingan 5 ta tovar qaysi?",
+    "2025-yilda eng ko‘p bitim tuzgan 5 ta xaridor kim?",
+    "2024 va 2025-yillarda paxta narxi qanday o‘zgargan?",
+    "2025-yilda nechta bitim bekor qilingan?",
+    "Какие товары лидировали по обороту в 2025 году?",
+    "В каком регионе было больше всего сделок в 2025 году?",
+]
+
+async def examples_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rows = [[KeyboardButton(q)] for q in EXAMPLE_QUESTIONS]
+    ru = ctx.user_data.get("lang") == "ru"
+    await update.message.reply_text(
+        "Выберите пример вопроса или напишите свой:" if ru else
+        "Savol namunalaridan birini tanlang yoki o‘z savolingizni yozing:",
+        reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True))
+
+async def clear_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    HISTORY.pop(update.effective_chat.id, None)
+    msg = "Контекст диалога очищен. Задайте новый вопрос." if ctx.user_data.get("lang") == "ru" else "Suhbat konteksti tozalandi. Yangi savol yuboring."
+    await update.message.reply_text(msg)
+
+async def hide_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = "Примеры скрыты." if ctx.user_data.get("lang") == "ru" else "Namunalar yashirildi."
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
+
+async def set_commands(app):
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start", "Botni boshlash"),
+            BotCommand("examples", "Savol namunalarini ko‘rish"),
+            BotCommand("clear", "Suhbat kontekstini tozalash"),
+            BotCommand("hide", "Namuna tugmalarini yashirish"),
+            BotCommand("test", "Ulanishni tekshirish"),
+        ])
+    except Exception:
+        log.exception("Could not set Telegram command menu")
 
 async def test_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Gemini ulanishi tekshirilmoqda… / Проверяю подключение Gemini…")
@@ -90,6 +129,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     q = msg.text.strip()[:1500]
     lang = detect_lang(q)
+    ctx.user_data["lang"] = lang
     status_text = "Savolingiz tekshirilmoqda…" if lang == "uz" else "Проверяю ваш вопрос…"
     status = await msg.reply_text(status_text)
     lock = LOCKS.setdefault(chat_id, asyncio.Lock())
@@ -100,7 +140,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sqls = []
         try:
             text, HISTORY[chat_id], sqls = await asyncio.wait_for(
-                agent.answer(q, HISTORY.get(chat_id, [])), timeout=45)
+                agent.answer(q, HISTORY.get(chat_id, [])), timeout=65)
         except asyncio.TimeoutError:
             text = agent.ERR_MSG
         finally:
@@ -228,6 +268,7 @@ def run_web():
 
 async def warm(app):
     """At startup: open the Gemini connection and pick a working model, so the first user is not slow."""
+    await set_commands(app)
     try:
         log.info("warmup:\n%s", await agent.diagnose())
     except Exception:
@@ -237,6 +278,9 @@ def main():
     threading.Thread(target=run_web, daemon=True).start()
     app = Application.builder().token(TOKEN).concurrent_updates(True).post_init(warm).build()
     app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("examples", examples_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(CommandHandler("hide", hide_cmd))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_button))
