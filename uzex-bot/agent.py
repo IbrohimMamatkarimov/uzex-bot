@@ -171,9 +171,9 @@ Direct answer first (with the exact figure), then at most 2 short lines (assumpt
 # ------------------------------------------------------------------ Gemini loop
 _API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _client = genai.Client(api_key=_API_KEY) if _API_KEY else None
-MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-3.6-flash",
-                      "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-preview",
-                      "gemini-4-argon"] if m]
+MODELS = list(dict.fromkeys(m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.5-flash-lite",
+                                        "gemini-3.1-flash-lite", "gemini-3.8-flash",
+                                        "gemini-3.6-flash", "gemini-3.5-flash"] if m))
 _model_idx = 0
 _SYSTEM = build_system_prompt()     # built ONCE at startup, so the first question is not slow
 _CACHE: "OrderedDict[str, tuple]" = OrderedDict()   # same first question -> instant answer
@@ -188,6 +188,16 @@ _TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
 GEN_TIMEOUT = 10      # allow a normal Gemini response; fallback remains limited to one model
 _BAD = set()          # models that returned 404 / not found -> never try again
 _THINK = ["level", "budget", "none"]   # thinking styles, we drop to the next one if the API rejects it
+
+class DailyQuotaExhausted(RuntimeError):
+    """Every model attempted for this request is out of daily quota."""
+
+DAILY_QUOTA_MSG = "__GEMINI_DAILY_QUOTA_EXHAUSTED__"
+
+def _is_daily_quota_error(error):
+    message = str(error).lower()
+    return ("429" in message or "resource_exhausted" in message) and any(
+        marker in message for marker in ("requests per day limit exceeded", "free_tier_requests"))
 
 def _thinking():
     """Make Gemini think as little as possible: thinking is the #1 cause of slow answers."""
@@ -236,11 +246,16 @@ async def _generate(contents):
     global _model_idx
     last = None
     n = len(MODELS)
-    for attempt in range(min(n, 2)):
-        idx = (_model_idx + attempt) % n
+    errors = []
+    attempted = 0
+    for offset in range(n):
+        if attempted >= min(n, 2):
+            break
+        idx = (_model_idx + offset) % n
         model = MODELS[idx]
         if model in _BAD and len(_BAD) < n:
             continue
+        attempted += 1
         t0 = time.time()
         try:
             resp = await _call(model, contents)
@@ -249,6 +264,7 @@ async def _generate(contents):
             return resp
         except Exception as e:
             last = e
+            errors.append(e)
             msg = f"{type(e).__name__}: {e}"
             log.warning("Gemini error (model=%s, %.1fs): %s", model, time.time() - t0, msg[:200])
             low = msg.lower()
@@ -256,7 +272,11 @@ async def _generate(contents):
                 _BAD.add(model)
             # Do not sleep or cycle through every configured model on a slow API.
             continue
-    raise last
+    if any(_is_daily_quota_error(error) for error in errors):
+        raise DailyQuotaExhausted("Gemini daily request quota exhausted") from last
+    if last is not None:
+        raise last
+    raise RuntimeError("No usable Gemini model is configured")
 
 async def diagnose() -> str:
     """Used by /test: tests every model in parallel, shows result, and picks the first that works."""
@@ -348,6 +368,9 @@ async def answer(question: str, history: list, audio_data: bytes | None = None,
                 text="Give the final answer now using only the results above.")]))
             resp = await _generate(contents)
             text = (resp.text or "").strip()
+    except DailyQuotaExhausted:
+        log.warning("Gemini daily quota exhausted for the available fallback models")
+        return DAILY_QUOTA_MSG, history, []
     except Exception:
         log.exception("agent failure")
         return ERR_MSG, history, []

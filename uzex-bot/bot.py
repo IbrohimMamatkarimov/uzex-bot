@@ -140,6 +140,17 @@ def detect_lang(text: str) -> str:
     cyr = sum("\u0400" <= ch <= "\u04ff" for ch in text)
     lat = sum(ch.isascii() and ch.isalpha() for ch in text)
     return "ru" if cyr > lat else "uz"
+
+def localized_agent_error(error: str, lang: str) -> str:
+    if error == agent.DAILY_QUOTA_MSG:
+        return ("Bugungi bepul AI so‘rovlar limiti tugadi. Keyinroq urinib ko‘ring yoki administratorga xabar bering."
+                if lang == "uz" else
+                "Сегодня исчерпан бесплатный лимит запросов AI. Попробуйте позже или сообщите администратору.")
+    if error == agent.ERR_MSG:
+        return ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
+                "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
+    return error
+
 def footer(lang: str, n_sql: int, secs: float) -> str:
     s = f"{secs:.1f}".replace(".", ",")
     if lang == "ru":
@@ -230,12 +241,10 @@ async def answer_question(msg, ctx: ContextTypes.DEFAULT_TYPE, question: str,
         finally:
             stop.set(); await t
         secs = time.time() - t0
-    if audio_data is not None and text != agent.ERR_MSG:
+    if audio_data is not None and text not in (agent.ERR_MSG, agent.DAILY_QUOTA_MSG):
         lang = detect_lang(text)
     ctx.user_data["lang"] = lang
-    if text == agent.ERR_MSG:
-        text = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
-                "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
+    text = localized_agent_error(text, lang)
     kb = None
     if sqls:
         key = f"{chat_id}_{msg.message_id}"
@@ -373,11 +382,9 @@ async def answer_webapp_question(user_id: int, question: str, audio_data: bytes 
             HISTORY[user_id] = history
         except asyncio.TimeoutError:
             answer, sqls = agent.ERR_MSG, []
-    if audio_data is not None and answer != agent.ERR_MSG:
+    if audio_data is not None and answer not in (agent.ERR_MSG, agent.DAILY_QUOTA_MSG):
         lang = detect_lang(answer)
-    if answer == agent.ERR_MSG:
-        answer = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
-                  "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
+    answer = localized_agent_error(answer, lang)
     elapsed = time.monotonic() - started
     if sqls:
         answer = f"{answer}\n\n{footer(lang, len(sqls), elapsed)}"
