@@ -58,8 +58,8 @@
   const input = $("question"), send = $("send"), answer = $("answer"), result = $("result");
   const voiceButton = $("voice"), voiceStatus = $("voiceStatus"), speakButton = $("speak");
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let recognition = null, listening = false, speaking = false, answerLang = lang;
   let lang = tg?.initDataUnsafe?.user?.language_code?.toLowerCase().startsWith("ru") ? "ru" : "uz";
+  let recognition = null, listening = false, speaking = false, answerLang = lang;
 
   if (SpeechRecognition) {
     recognition = new SpeechRecognition();
