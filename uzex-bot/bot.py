@@ -19,6 +19,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 import agent, extras
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
