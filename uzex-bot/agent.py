@@ -151,22 +151,41 @@ async def _generate(contents):
         system_instruction=_SYSTEM, tools=[_TOOL], temperature=0.1,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
     last = None
-    for attempt in range(6):
+    for attempt in range(4):
         model = MODELS[min(_model_idx, len(MODELS) - 1)]
         try:
-            return await _client.aio.models.generate_content(model=model, contents=contents, config=cfg)
+            return await asyncio.wait_for(
+                _client.aio.models.generate_content(model=model, contents=contents, config=cfg), timeout=30)
         except Exception as e:
             last = e
-            msg = str(e)
-            if ("404" in msg or "NOT_FOUND" in msg or "not found" in msg.lower()) and _model_idx < len(MODELS) - 1:
-                log.warning("model %s unavailable, falling back", model)
+            msg = f"{type(e).__name__}: {e}"
+            log.warning("Gemini error (model=%s, attempt=%d): %s", model, attempt + 1, msg[:300])
+            if ("404" in msg or "NOT_FOUND" in msg or "not found" in msg.lower()
+                    or "400" in msg or "INVALID_ARGUMENT" in msg) and _model_idx < len(MODELS) - 1:
+                _model_idx += 1
+                continue
+            if isinstance(e, asyncio.TimeoutError) and _model_idx < len(MODELS) - 1:
                 _model_idx += 1
                 continue
             if any(x in msg for x in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500")):
-                await asyncio.sleep(2 * (attempt + 1))
+                await asyncio.sleep(2)
                 continue
             raise
     raise last
+
+async def diagnose() -> str:
+    """Used by /test: shows the exact Gemini error (or success) in the chat."""
+    if _client is None:
+        return "GEMINI_API_KEY is NOT set in Render environment."
+    out = []
+    for m in MODELS:
+        try:
+            r = await asyncio.wait_for(_client.aio.models.generate_content(model=m, contents="Say OK"), timeout=25)
+            out.append(f"OK  {m}: {(r.text or '')[:20]}")
+            break
+        except Exception as e:
+            out.append(f"ERR {m}: {type(e).__name__}: {str(e)[:160]}")
+    return "\n".join(out)
 
 ERR_MSG = ("Kechirasiz, hozir texnik muammo bor. Iltimos, savolni bir ozdan keyin qayta yuboring.\n"
            "Извините, сейчас техническая неполадка. Пожалуйста, повторите вопрос чуть позже.")

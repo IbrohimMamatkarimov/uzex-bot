@@ -40,6 +40,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     HISTORY.pop(update.effective_chat.id, None)
     await update.message.reply_text(WELCOME)
 
+async def test_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Testing Gemini...")
+    await update.message.reply_text(await agent.diagnose())
+
 async def _typing(bot, chat_id, stop: asyncio.Event):
     while not stop.is_set():
         try:
@@ -63,7 +67,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         t = asyncio.create_task(_typing(ctx.bot, chat_id, stop))
         try:
             text, HISTORY[chat_id] = await asyncio.wait_for(
-                agent.answer(q, HISTORY.get(chat_id, [])), timeout=110)
+                agent.answer(q, HISTORY.get(chat_id, [])), timeout=75)
         except asyncio.TimeoutError:
             text = agent.ERR_MSG
         finally:
@@ -95,6 +99,7 @@ def main():
     threading.Thread(target=run_web, daemon=True).start()
     app = Application.builder().token(TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_other))
     log.info("bot started")
