@@ -60,12 +60,13 @@ TRACES: "OrderedDict[str, dict]" = OrderedDict()     # answer id -> {sqls, quest
 _plot_lock = threading.Lock()
 
 def detect_lang(text: str) -> str:
-    """'ru' for Russian, 'uz' otherwise (Uzbek Latin or Cyrillic)."""
-    if re.search(r"[ўқғҳЎҚҒҲ]", text):
+    """Detect Russian Cyrillic, while keeping Uzbek Cyrillic as Uzbek."""
+    uz_letters = set("\u045e\u049b\u0493\u04b3\u040e\u049a\u0492\u04b2")
+    if any(ch in uz_letters for ch in text):
         return "uz"
-    cyr = len(re.findall(r"[а-яёА-ЯЁ]", text)); lat = len(re.findall(r"[a-zA-Z]", text))
+    cyr = sum("\u0400" <= ch <= "\u04ff" for ch in text)
+    lat = sum(ch.isascii() and ch.isalpha() for ch in text)
     return "ru" if cyr > lat else "uz"
-
 def footer(lang: str, n_sql: int, secs: float) -> str:
     s = f"{secs:.1f}".replace(".", ",")
     if lang == "ru":
@@ -77,9 +78,9 @@ def keyboard(key: str, lang: str, sqls: list):
         return None
     ru = lang == "ru"
     # chart button is always shown: checking it here re-ran every SQL query and froze the bot for seconds
-    row = [InlineKeyboardButton("🗂 Источник" if ru else "🗂 Manba", callback_data=f"src:{key}"),
-           InlineKeyboardButton("⬇️ Excel", callback_data=f"xls:{key}"),
-           InlineKeyboardButton("🖼 График" if ru else "🖼 Diagramma", callback_data=f"cht:{key}")]
+    row = [InlineKeyboardButton("\U0001f4da Источник" if ru else "\U0001f4da Manba", callback_data=f"src:{key}"),
+           InlineKeyboardButton("\U0001f4e5 Excel", callback_data=f"xls:{key}"),
+           InlineKeyboardButton("\U0001f4ca График" if ru else "\U0001f4ca Diagramma", callback_data=f"cht:{key}")]
     return InlineKeyboardMarkup([row])
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -88,6 +89,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     q = msg.text.strip()[:1500]
+    status = await msg.reply_text("Checking your question…")
     lock = LOCKS.setdefault(chat_id, asyncio.Lock())
     async with lock:                       # one question at a time per chat, many chats in parallel
         t0 = time.time()
@@ -113,7 +115,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb = keyboard(key, lang, sqls)
     chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
     for i, ch in enumerate(chunks):
-        await msg.reply_text(ch, reply_markup=kb if i == len(chunks) - 1 else None)
+        if i == 0:
+            await status.edit_text(ch, reply_markup=kb if i == len(chunks) - 1 else None)
+        else:
+            await msg.reply_text(ch, reply_markup=kb if i == len(chunks) - 1 else None)
 
 BUSY: set = set()      # buttons being processed right now (ignore double taps)
 
@@ -129,7 +134,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = entry["lang"] if entry else "uz"
     ru = lang == "ru"
 
-    toast = {"src": "🗂", "xls": "⏳ Готовлю Excel…" if ru else "⏳ Excel tayyorlanmoqda…",
+    toast = {"src": "📚", "xls": "⏳ Готовлю Excel…" if ru else "⏳ Excel tayyorlanmoqda…",
              "cht": "⏳ Рисую график…" if ru else "⏳ Diagramma chizilmoqda…"}.get(kind, "")
     try:
         await cq.answer(toast)                      # small popup, so the user sees that the tap worked
