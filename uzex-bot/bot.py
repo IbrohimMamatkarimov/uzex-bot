@@ -3,12 +3,16 @@
 Env: TELEGRAM_TOKEN, GEMINI_API_KEY, optional GEMINI_MODEL, BOT_USERNAME, PORT
 Run: python bot.py
 """
-import os, re, time, asyncio, threading, logging
+import os, re, time, asyncio, threading, logging, json, hmac, hashlib
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from pathlib import Path
 from collections import OrderedDict
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qsl
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters,
-                      ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton, BotCommand)
+                      ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton, BotCommand,
+                      WebAppInfo, MenuButtonWebApp)
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -19,20 +23,19 @@ log = logging.getLogger("bot")
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://uzex-bot-tbm8.onrender.com").rstrip("/")
+MINI_APP_URL = os.environ.get("MINI_APP_URL", f"{BASE_URL}/app")
+WEB_DIR = Path(__file__).resolve().parent / "webapp"
+WELCOME_IMAGE = Path(__file__).resolve().parent / "welcome.png"
 
 WELCOME = (
-    "Assalomu alaykum! Men UZEX birja bitimlari reyestri bo‘yicha AI-yordamchiman (2022–2026, 500 000 bitim). "
-    "Savolingizni o‘zbek yoki rus tilida yozing.\n\n"
-    "Masalan:\n"
-    "• 2025-yilda eng ko‘p savdo qilingan 5 ta tovar qaysi?\n"
-    "• Paxta-xom o‘rtacha narxi 2024 va 2025-yillarda qanday o‘zgargan?\n"
-    "• Qaysi brokerda eng ko‘p bitim bor?\n\n"
-    "Здравствуйте! Я AI-помощник по реестру сделок биржи UZEX (2022–2026, 500 000 сделок). "
-    "Задайте вопрос на узбекском или русском языке.\n\n"
-    "Например:\n"
-    "• Какой регион лидирует по объёму торгов цементом?\n"
-    "• Сколько сделок было аннулировано в 2025 году?\n"
-    "• Какая средняя цена пшеницы за тонну в 2026 году?"
+    "UZEX Bitimlar AI\n"
+    "Birja bitimlari bo‘yicha ma’lumotga asoslangan yordamchi.\n\n"
+    "500 000 ta bitim reyestri · 03.01.2022–30.10.2026\n"
+    "O‘zbekcha yoki ruscha savol bering. Javoblar reyestrdagi ma’lumotlarga asoslanadi.\n\n"
+    "Здравствуйте! AI-помощник по реестру сделок UZEX.\n"
+    "500 000 сделок · 03.01.2022–30.10.2026\n"
+    "Задайте вопрос на узбекском или русском языке. Ответы основаны на данных реестра."
 )
 
 HISTORY: dict[int, list] = {}
@@ -40,7 +43,16 @@ LOCKS: dict[int, asyncio.Lock] = {}
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     HISTORY.pop(update.effective_chat.id, None)
-    await update.message.reply_text(WELCOME + "\n\nMisollar: /examples · Suhbatni tozalash: /clear")
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Ilovani ochish · Открыть приложение", web_app=WebAppInfo(url=MINI_APP_URL))],
+        [InlineKeyboardButton("🇺🇿 Misol savol", callback_data="sample:uz"),
+         InlineKeyboardButton("🇷🇺 Пример вопроса", callback_data="sample:ru")],
+    ])
+    if WELCOME_IMAGE.exists():
+        with WELCOME_IMAGE.open("rb") as photo:
+            await update.message.reply_photo(photo=photo, caption=WELCOME, reply_markup=buttons)
+    else:
+        await update.message.reply_text(WELCOME, reply_markup=buttons)
 
 EXAMPLE_QUESTIONS = [
     "2025-yilda eng ko‘p savdo qilingan 5 ta tovar qaysi?",
@@ -77,6 +89,12 @@ async def set_commands(app):
             BotCommand("hide", "Namuna tugmalarini yashirish"),
             BotCommand("test", "Ulanishni tekshirish"),
         ])
+        await app.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="UZEX AI", web_app=WebAppInfo(url=MINI_APP_URL)))
+        await app.bot.set_my_description(
+            "UZEX bitimlari reyestri bo‘yicha o‘zbek va rus tillarida savol-javob mini-ilovasi.")
+        await app.bot.set_my_short_description(
+            "UZEX bitimlari bo‘yicha o‘zbekcha va ruscha AI-yordamchi.")
     except Exception:
         log.exception("Could not set Telegram command menu")
 
@@ -97,6 +115,7 @@ async def _typing(bot, chat_id, stop: asyncio.Event):
 
 TRACES: "OrderedDict[str, dict]" = OrderedDict()     # answer id -> {sqls, question, qmsg, lang}
 _plot_lock = threading.Lock()
+BOT_LOOP: asyncio.AbstractEventLoop | None = None
 
 def detect_lang(text: str) -> str:
     """Detect Russian Cyrillic, while keeping Uzbek Cyrillic as Uzbek."""
@@ -126,8 +145,25 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
         return
-    chat_id = update.effective_chat.id
-    q = msg.text.strip()[:1500]
+    await answer_question(msg, ctx, msg.text)
+
+async def on_web_app_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg or not msg.web_app_data:
+        return
+    try:
+        data = json.loads(msg.web_app_data.data)
+        question = str(data.get("question", "")).strip()[:1500]
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        question = msg.web_app_data.data.strip()[:1500]
+    if not question:
+        await msg.reply_text("Savolni kiriting. / Введите вопрос.")
+        return
+    await answer_question(msg, ctx, question)
+
+async def answer_question(msg, ctx: ContextTypes.DEFAULT_TYPE, question: str):
+    chat_id = msg.chat_id
+    q = question.strip()[:1500]
     lang = detect_lang(q)
     ctx.user_data["lang"] = lang
     status_text = "Savolingiz tekshirilmoqda…" if lang == "uz" else "Проверяю ваш вопрос…"
@@ -173,6 +209,13 @@ def _reply_to(msg_id):
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
     kind, _, key = (cq.data or "").partition(":")
+    if kind == "sample":
+        await cq.answer()
+        question = EXAMPLE_QUESTIONS[0] if key == "uz" else EXAMPLE_QUESTIONS[4]
+        ctx.user_data["lang"] = key
+        prompt = await ctx.bot.send_message(cq.message.chat_id, question)
+        await answer_question(prompt, ctx, question)
+        return
     entry = TRACES.get(key)
     chat_id = cq.message.chat_id if cq.message else cq.from_user.id
     lang = entry["lang"] if entry else "uz"
@@ -248,26 +291,128 @@ async def on_other(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     prompt = "Savolingizni matn ko‘rinishida yuboring." if lang == "uz" else "Пожалуйста, отправьте вопрос текстом."
     await update.message.reply_text(prompt)
 
-# ---- tiny web page + health check (Render/Railway need an open port; judges can open it too)
+def validate_webapp_init_data(raw: str) -> int | None:
+    """Validate Telegram-signed Mini App data; never trust initDataUnsafe from the browser."""
+    try:
+        fields = dict(parse_qsl(raw, keep_blank_values=True, strict_parsing=True))
+        received_hash = fields.pop("hash")
+        auth_date = int(fields["auth_date"])
+        now = int(time.time())
+        if auth_date > now + 60 or now - auth_date > 24 * 60 * 60:
+            return None
+        data_check = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
+        secret = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, received_hash):
+            return None
+        return int(json.loads(fields["user"])["id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+async def answer_webapp_question(user_id: int, question: str):
+    lang = detect_lang(question)
+    lock = LOCKS.setdefault(user_id, asyncio.Lock())
+    started = time.monotonic()
+    async with lock:
+        try:
+            answer, history, sqls = await asyncio.wait_for(
+                agent.answer(question, HISTORY.get(user_id, [])), timeout=65)
+            HISTORY[user_id] = history
+        except asyncio.TimeoutError:
+            answer, sqls = agent.ERR_MSG, []
+    if answer == agent.ERR_MSG:
+        answer = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
+                  "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
+    elapsed = time.monotonic() - started
+    if sqls:
+        answer = f"{answer}\n\n{footer(lang, len(sqls), elapsed)}"
+    return {"answer": answer, "elapsed": elapsed}
+
+# ---- Telegram Mini App + health check
 class Page(BaseHTTPRequestHandler):
     def do_GET(self):
-        link = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "#"
-        html = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-                f"<title>UZEX AI Bot</title><body style='font-family:system-ui;max-width:560px;margin:12vh auto;padding:0 16px'>"
-                f"<h2>UZEX AI Hackathon — Telegram bot</h2><p>Birja bitimlari reyestri bo‘yicha savollarga o‘zbek va rus tillarida javob beradi.<br>"
-                f"Отвечает на вопросы по реестру сделок биржи на узбекском и русском языках.</p>"
-                f"<p><a href='{link}' style='font-size:1.2em'>Open in Telegram → @{BOT_USERNAME}</a></p></body>").encode()
-        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
-        self.wfile.write(html)
+        path = urlparse(self.path).path
+        if path in ("/", "/health", "/healthz"):
+            body = (b"UZEX AI is running. Open the Telegram Mini App at /app." if path != "/" else
+                    b"<!doctype html><meta charset=utf-8><meta http-equiv=refresh content='0;url=/app'><a href='/app'>Open UZEX AI</a>")
+            self._send(body, "text/plain; charset=utf-8" if path != "/" else "text/html; charset=utf-8")
+            return
+        files = {
+            "/app": (WEB_DIR / "index.html", "text/html; charset=utf-8"),
+            "/app/": (WEB_DIR / "index.html", "text/html; charset=utf-8"),
+            "/app.css": (WEB_DIR / "app.css", "text/css; charset=utf-8"),
+            "/app.js": (WEB_DIR / "app.js", "application/javascript; charset=utf-8"),
+            "/hero.svg": (WEB_DIR / "hero.svg", "image/svg+xml"),
+            "/welcome.png": (WELCOME_IMAGE, "image/png"),
+        }
+        item = files.get(path)
+        if not item or not item[0].is_file():
+            self.send_error(404)
+            return
+        self._send(item[0].read_bytes(), item[1])
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/ask":
+            self.send_error(404)
+            return
+        if BOT_LOOP is None:
+            self._json(503, {"error": "Ilova ishga tushmoqda. Birozdan keyin qayta urinib ko‘ring."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 1 <= length <= 8192:
+                self._json(413, {"error": "Savol juda uzun."})
+                return
+            payload = json.loads(self.rfile.read(length))
+            question = str(payload.get("question", "")).strip()[:1500]
+            user_id = validate_webapp_init_data(str(payload.get("initData", "")))
+            if user_id is None:
+                self._json(401, {"error": "Telegram seansi tasdiqlanmadi. Ilovani bot ichidan qayta oching."})
+                return
+            if not question:
+                self._json(400, {"error": "Savol matnini kiriting."})
+                return
+            future = asyncio.run_coroutine_threadsafe(answer_webapp_question(user_id, question), BOT_LOOP)
+            result = future.result(timeout=70)
+            self._json(200, result)
+        except FutureTimeoutError:
+            self._json(504, {"error": "Javob olish cho‘zildi. Iltimos, yana urinib ko‘ring."})
+        except (ValueError, AttributeError, json.JSONDecodeError):
+            self._json(400, {"error": "So‘rov formati noto‘g‘ri."})
+        except Exception:
+            log.exception("Mini App request failed")
+            self._json(500, {"error": "Texnik xatolik. Birozdan keyin qayta urinib ko‘ring."})
+
+    def _json(self, status, data):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send(self, body, content_type):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_HEAD(self):
-        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+        self.send_response(200 if urlparse(self.path).path in ("/", "/health", "/healthz", "/app", "/app/") else 404)
+        self.end_headers()
     def log_message(self, *a): pass
 
 def run_web():
-    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Page).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Page).serve_forever()
 
 async def warm(app):
     """At startup: open the Gemini connection and pick a working model, so the first user is not slow."""
+    global BOT_LOOP
+    BOT_LOOP = asyncio.get_running_loop()
     await set_commands(app)
     try:
         log.info("warmup:\n%s", await agent.diagnose())
