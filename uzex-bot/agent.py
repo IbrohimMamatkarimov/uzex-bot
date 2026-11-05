@@ -12,7 +12,7 @@ log = logging.getLogger("agent")
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 MAX_ROWS = 40          # rows returned to the model per query
-MAX_STEPS = 5          # max tool calls per question
+MAX_STEPS = 2          # one SQL tool round plus a final response
 QUERY_TIMEOUT = 20     # seconds
 
 # ------------------------------------------------------------------ database
@@ -167,7 +167,7 @@ _TOOL = types.Tool(function_declarations=[types.FunctionDeclaration(
         "query": types.Schema(type="STRING", description="A single DuckDB SELECT / WITH statement.")},
         required=["query"]))])
 
-GEN_TIMEOUT = 12      # seconds to wait for ONE Gemini call before trying the next model
+GEN_TIMEOUT = 4       # keep model attempts short; fallback is limited to one model
 _BAD = set()          # models that returned 404 / not found -> never try again
 _THINK = ["level", "budget", "none"]   # thinking styles, we drop to the next one if the API rejects it
 
@@ -198,11 +198,11 @@ async def _call(model, contents):
     raise RuntimeError("thinking config failed")
 
 async def _generate(contents):
-    """Try models in rotation: on overload/timeout/404 move straight to the next model."""
+    """Use the selected model first, then at most one fallback to avoid minute-long waits."""
     global _model_idx
     last = None
     n = len(MODELS)
-    for attempt in range(n * 2):
+    for attempt in range(min(n, 2)):
         idx = (_model_idx + attempt) % n
         model = MODELS[idx]
         if model in _BAD and len(_BAD) < n:
@@ -220,8 +220,7 @@ async def _generate(contents):
             low = msg.lower()
             if "404" in low or "not_found" in low or "not found" in low:
                 _BAD.add(model)
-            if attempt >= n - 1:
-                await asyncio.sleep(0.3)
+            # Do not sleep or cycle through every configured model on a slow API.
             continue
     raise last
 
