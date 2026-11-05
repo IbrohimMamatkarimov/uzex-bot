@@ -60,6 +60,23 @@ def run_sql(query: str) -> str:
         out.append(f"... (truncated to first {MAX_ROWS} rows; add LIMIT / aggregate)")
     return "\n".join(out)
 
+def exec_rows(query: str, limit: int = 5000):
+    """Run a SELECT and return (columns, rows). Raises on error. Used for chart/Excel exports."""
+    q = (query or "").strip().rstrip(";").strip()
+    if not _SQL_START.match(q) or ";" in q:
+        raise ValueError("only SELECT allowed")
+    with _lock:
+        cur = _con.cursor()
+        timer = threading.Timer(QUERY_TIMEOUT, cur.interrupt)
+        timer.start()
+        try:
+            cur.execute(q)
+            cols = [d[0] for d in cur.description]
+            return cols, cur.fetchmany(limit)
+        finally:
+            timer.cancel()
+            cur.close()
+
 def _distinct(sql: str) -> list:
     return [r[0] for r in _con.execute(sql).fetchall() if r[0] is not None]
 
@@ -192,8 +209,8 @@ async def diagnose() -> str:
 ERR_MSG = ("Kechirasiz, hozir texnik muammo bor. Iltimos, savolni bir ozdan keyin qayta yuboring.\n"
            "Извините, сейчас техническая неполадка. Пожалуйста, повторите вопрос чуть позже.")
 
-async def answer(question: str, history: list) -> tuple[str, list]:
-    """history: list of (user_text, model_text). Returns (answer, new_history)."""
+async def answer(question: str, history: list) -> tuple[str, list, list]:
+    """history: list of (user_text, model_text). Returns (answer, new_history, sql_queries_used)."""
     global _SYSTEM
     if _SYSTEM is None:
         _SYSTEM = build_system_prompt()
@@ -203,6 +220,7 @@ async def answer(question: str, history: list) -> tuple[str, list]:
         contents.append(types.Content(role="model", parts=[types.Part(text=m)]))
     contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
     text = ""
+    trace = []
     try:
         for _ in range(MAX_STEPS):
             resp = await _generate(contents)
@@ -219,6 +237,8 @@ async def answer(question: str, history: list) -> tuple[str, list]:
                 q = (fc.args or {}).get("query", "")
                 log.info("SQL> %s", q.replace("\n", " ")[:300])
                 res = await asyncio.to_thread(run_sql, q)
+                if not res.startswith(("ERROR", "OK: 0 rows")):
+                    trace.append(q.strip().rstrip(";"))
                 parts.append(types.Part.from_function_response(name=fc.name, response={"result": res}))
             contents.append(types.Content(role="user", parts=parts))
         else:
@@ -229,7 +249,7 @@ async def answer(question: str, history: list) -> tuple[str, list]:
             text = (resp.text or "").strip()
     except Exception:
         log.exception("agent failure")
-        return ERR_MSG, history
+        return ERR_MSG, history, []
     if not text:
-        return ERR_MSG, history
-    return text, (history + [(question, text)])[-6:]
+        return ERR_MSG, history, []
+    return text, (history + [(question, text)])[-6:], trace
