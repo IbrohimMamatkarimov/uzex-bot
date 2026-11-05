@@ -13,11 +13,12 @@
       examples: "Misol savollar", answer: "JAVOB", verified: "Reyestr ma’lumotlari asosida",
       footer: "Manba: UZEX bitimlar reyestri", wait: "Reyestr tekshirilmoqda…",
       err: "Javob olinmadi. Iltimos, qayta urinib ko‘ring.", init: "Ilovani Telegram ichidan oching.",
-      assistantStatus: "Yordamga tayyorman", voiceTitle: "Ovozli savol", listening: "Tinglayapman… Gapiring.",
+      assistantStatus: "Yordamga tayyorman", voiceTitle: "Ovozli savol", listening: "Gapiring. Tugatish uchun mikrofonni bosing.",
       voiceReady: "Ovoz matnga aylandi — yuborishdan oldin tekshiring.",
       voiceUnsupported: "Bu brauzerda ovozli kiritish ishlamaydi. Savolni yozing yoki botga ovozli xabar yuboring.",
       voicePermission: "Mikrofonga ruxsat bering yoki savolni yozing.", voiceNoSpeech: "Ovoz aniqlanmadi. Yana urinib ko‘ring.",
       voiceUnavailable: "Ovozli xizmat hozir ishlamayapti. Botga ovozli xabar yuboring.",
+      voiceTooLarge: "Ovozli savol juda uzun. 45 soniyadan qisqa qilib qayta yozing.",
       listen: "Javobni tinglash", stopListen: "Ovozni to‘xtatish",
       questions: [
         "2025-yilda eng ko‘p savdo qilingan 5 ta tovar qaysi?",
@@ -37,11 +38,12 @@
       examples: "Примеры вопросов", answer: "ОТВЕТ", verified: "По данным реестра",
       footer: "Источник: реестр сделок UZEX", wait: "Проверяю реестр…",
       err: "Не удалось получить ответ. Попробуйте ещё раз.", init: "Откройте приложение в Telegram.",
-      assistantStatus: "Готов помочь", voiceTitle: "Голосовой вопрос", listening: "Слушаю… Говорите.",
+      assistantStatus: "Готов помочь", voiceTitle: "Голосовой вопрос", listening: "Говорите. Нажмите микрофон, чтобы закончить.",
       voiceReady: "Голос преобразован в текст — проверьте перед отправкой.",
       voiceUnsupported: "Голосовой ввод не поддерживается в этом браузере. Напишите вопрос или отправьте боту голосовое сообщение.",
       voicePermission: "Разрешите доступ к микрофону или введите вопрос.", voiceNoSpeech: "Речь не распознана. Попробуйте ещё раз.",
       voiceUnavailable: "Голосовой сервис сейчас недоступен. Отправьте боту голосовое сообщение.",
+      voiceTooLarge: "Голосовое сообщение слишком длинное. Запишите короче 45 секунд.",
       listen: "Прослушать ответ", stopListen: "Остановить озвучивание",
       questions: [
         "Какие 5 товаров лидировали по обороту в 2025 году?",
@@ -60,8 +62,12 @@
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   let lang = tg?.initDataUnsafe?.user?.language_code?.toLowerCase().startsWith("ru") ? "ru" : "uz";
   let recognition = null, listening = false, speaking = false, answerLang = lang;
+  const canRecordVoice = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+  let mediaRecorder = null, mediaStream = null, voiceChunks = [], voiceTimer = null;
 
-  if (SpeechRecognition) {
+  if (canRecordVoice) {
+    voiceButton.hidden = false;
+  } else if (SpeechRecognition) {
     recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = true;
@@ -125,7 +131,12 @@
   async function ask() {
     const question = input.value.trim();
     if (!question) { input.focus(); toast(copy[lang].placeholder); return; }
+    await submitQuestion(question, null);
+  }
+
+  async function submitQuestion(question, audioBlob) {
     if (!tg?.initData) { toast(copy[lang].init); return; }
+    if (audioBlob && audioBlob.size > 2 * 1024 * 1024) { toast(copy[lang].voiceTooLarge); return; }
     send.disabled = true;
     send.querySelector("span").textContent = copy[lang].wait;
     document.querySelector(".shell").classList.add("is-thinking");
@@ -135,9 +146,16 @@
     speakButton.querySelector("span:last-child").textContent = copy[lang].listen;
     result.hidden = true;
     try {
+      const request = {initData: tg.initData};
+      if (audioBlob) {
+        request.audio = await blobToBase64(audioBlob);
+        request.audioMimeType = audioBlob.type || "audio/webm";
+        voiceStatus.hidden = false;
+        voiceStatus.textContent = copy[lang].wait;
+      } else request.question = question;
       const response = await fetch("/api/ask", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({question, initData: tg.initData})
+        body: JSON.stringify(request)
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(copy[lang].err);
@@ -152,6 +170,7 @@
       send.disabled = false;
       send.querySelector("span").textContent = copy[lang].send;
       document.querySelector(".shell").classList.remove("is-thinking");
+      if (audioBlob) voiceStatus.hidden = true;
     }
   }
 
@@ -163,6 +182,11 @@
   }
 
   function toggleVoiceInput() {
+    if (canRecordVoice) {
+      if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+      else startVoiceRecording();
+      return;
+    }
     if (!recognition) { toast(copy[lang].voiceUnsupported); return; }
     if (listening) { recognition.stop(); return; }
     recognition.lang = lang === "ru" ? "ru-RU" : "uz-UZ";
@@ -170,6 +194,58 @@
     voiceStatus.textContent = copy[lang].listening;
     try { recognition.start(); }
     catch (_) { toast(copy[lang].voicePermission); }
+  }
+
+  async function startVoiceRecording() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+      const mimeType = typeof MediaRecorder.isTypeSupported === "function"
+        ? ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type))
+        : "";
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, {mimeType}) : new MediaRecorder(mediaStream);
+      voiceChunks = [];
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size) voiceChunks.push(event.data);
+        if (voiceChunks.reduce((total, chunk) => total + chunk.size, 0) > 2 * 1024 * 1024) {
+          toast(copy[lang].voiceTooLarge);
+          mediaRecorder?.stop();
+        }
+      };
+      mediaRecorder.onstop = () => {
+        window.clearTimeout(voiceTimer);
+        const recorder = mediaRecorder;
+        const blob = new Blob(voiceChunks, {type:recorder?.mimeType || mimeType || "audio/webm"});
+        mediaStream?.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+        mediaRecorder = null;
+        voiceButton.classList.remove("is-listening");
+        voiceButton.setAttribute("aria-pressed", "false");
+        if (blob.size > 2 * 1024 * 1024) { voiceStatus.hidden = true; return; }
+        if (!blob.size) { voiceStatus.hidden = true; toast(copy[lang].voiceNoSpeech); return; }
+        submitQuestion("", blob);
+      };
+      mediaRecorder.start(1000);
+      voiceButton.classList.add("is-listening");
+      voiceButton.setAttribute("aria-pressed", "true");
+      voiceStatus.hidden = false;
+      voiceStatus.textContent = copy[lang].listening;
+      voiceTimer = window.setTimeout(() => {
+        if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+      }, 45000);
+    } catch (_) {
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+      toast(copy[lang].voicePermission);
+    }
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error(copy[lang].voiceUnavailable));
+      reader.readAsDataURL(blob);
+    });
   }
 
   function toggleSpeechOutput() {

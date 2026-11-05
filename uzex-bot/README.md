@@ -18,7 +18,7 @@ Telegram Mini App:
   If the Render URL changes, set MINI_APP_URL to the new HTTPS URL ending in /app.
 
 Voice and motion:
-  The Mini App can dictate a question with the browser's speech recognition and read answers aloud with built-in speech synthesis.
+    The Mini App records a short question with the microphone and reads answers aloud with built-in speech synthesis. It falls back to browser speech recognition where recording is unavailable.
   Telegram accepts voice notes up to 45 seconds; the same Gemini data agent answers them without a separate transcription request.
   /start uses a looping UZEX assistant animation. UI motion respects the device's reduced-motion preference.
   Startup no longer probes every Gemini model; diagnostics run only when /test is requested, avoiding needless API quota use.

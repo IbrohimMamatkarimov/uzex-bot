@@ -3,7 +3,7 @@
 Env: TELEGRAM_TOKEN, GEMINI_API_KEY, optional GEMINI_MODEL, BOT_USERNAME, PORT
 Run: python bot.py
 """
-import os, re, time, asyncio, threading, logging, json, hmac, hashlib
+import os, re, time, asyncio, threading, logging, json, hmac, hashlib, base64
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from collections import OrderedDict
@@ -360,17 +360,21 @@ def validate_webapp_init_data(raw: str) -> int | None:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
-async def answer_webapp_question(user_id: int, question: str):
-    lang = detect_lang(question)
+async def answer_webapp_question(user_id: int, question: str, audio_data: bytes | None = None,
+                                 audio_mime_type: str = "audio/webm"):
+    lang = detect_lang(question) if question else "uz"
     lock = LOCKS.setdefault(user_id, asyncio.Lock())
     started = time.monotonic()
     async with lock:
         try:
             answer, history, sqls = await asyncio.wait_for(
-                agent.answer(question, HISTORY.get(user_id, [])), timeout=65)
+                agent.answer(question, HISTORY.get(user_id, []), audio_data=audio_data,
+                             audio_mime_type=audio_mime_type), timeout=65)
             HISTORY[user_id] = history
         except asyncio.TimeoutError:
             answer, sqls = agent.ERR_MSG, []
+    if audio_data is not None and answer != agent.ERR_MSG:
+        lang = detect_lang(answer)
     if answer == agent.ERR_MSG:
         answer = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
                   "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
@@ -413,8 +417,8 @@ class Page(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 1 <= length <= 8192:
-                self._json(413, {"error": "Savol juda uzun."})
+            if not 1 <= length <= 3 * 1024 * 1024:
+                self._json(413, {"error": "So‘rov hajmi ruxsat etilganidan katta."})
                 return
             payload = json.loads(self.rfile.read(length))
             question = str(payload.get("question", "")).strip()[:1500]
@@ -422,10 +426,31 @@ class Page(BaseHTTPRequestHandler):
             if user_id is None:
                 self._json(401, {"error": "Telegram seansi tasdiqlanmadi. Ilovani bot ichidan qayta oching."})
                 return
-            if not question:
+            audio_data = None
+            audio_mime_type = "audio/webm"
+            encoded_audio = payload.get("audio")
+            if encoded_audio:
+                if not isinstance(encoded_audio, str) or len(encoded_audio) > 2_796_204:
+                    self._json(413, {"error": "Ovozli savol 2 MB dan oshmasin."})
+                    return
+                try:
+                    audio_data = base64.b64decode(encoded_audio, validate=True)
+                except (ValueError, base64.binascii.Error):
+                    self._json(400, {"error": "Ovozli so‘rov formati noto‘g‘ri."})
+                    return
+                if not audio_data or len(audio_data) > 2 * 1024 * 1024:
+                    self._json(413, {"error": "Ovozli savol 2 MB dan oshmasin."})
+                    return
+                requested_mime = str(payload.get("audioMimeType", "audio/webm")).split(";", 1)[0].lower()
+                audio_mime_type = {"audio/mp4": "audio/m4a"}.get(requested_mime, requested_mime)
+                if audio_mime_type not in {"audio/webm", "audio/ogg", "audio/m4a", "audio/mpeg", "audio/wav"}:
+                    self._json(400, {"error": "Ovozli fayl turi qo‘llab-quvvatlanmaydi."})
+                    return
+            if not question and audio_data is None:
                 self._json(400, {"error": "Savol matnini kiriting."})
                 return
-            future = asyncio.run_coroutine_threadsafe(answer_webapp_question(user_id, question), BOT_LOOP)
+            future = asyncio.run_coroutine_threadsafe(
+                answer_webapp_question(user_id, question, audio_data, audio_mime_type), BOT_LOOP)
             result = future.result(timeout=70)
             self._json(200, result)
         except FutureTimeoutError:
