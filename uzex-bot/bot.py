@@ -27,28 +27,41 @@ BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://uzex-bot-tbm8.onrender
 MINI_APP_URL = os.environ.get("MINI_APP_URL", f"{BASE_URL}/app")
 WEB_DIR = Path(__file__).resolve().parent / "webapp"
 WELCOME_IMAGE = Path(__file__).resolve().parent / "welcome.png"
+WELCOME_ANIMATION = WEB_DIR / "assistant.gif"
 
 WELCOME = (
     "UZEX Bitimlar AI\n"
     "Birja bitimlari bo‘yicha ma’lumotga asoslangan yordamchi.\n\n"
     "500 000 ta bitim reyestri · 03.01.2022–30.10.2026\n"
-    "O‘zbekcha yoki ruscha savol bering. Javoblar reyestrdagi ma’lumotlarga asoslanadi.\n\n"
+    "O‘zbekcha yoki ruscha yozing yoki ovozli savol yuboring. Javoblar reyestrga asoslanadi.\n\n"
     "Здравствуйте! AI-помощник по реестру сделок UZEX.\n"
     "500 000 сделок · 03.01.2022–30.10.2026\n"
-    "Задайте вопрос на узбекском или русском языке. Ответы основаны на данных реестра."
+    "Задайте вопрос на узбекском или русском или отправьте голосовое сообщение. Ответы основаны на реестре."
 )
 
 HISTORY: dict[int, list] = {}
 LOCKS: dict[int, asyncio.Lock] = {}
 
+def preferred_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> str:
+    saved = ctx.user_data.get("lang")
+    if saved in ("uz", "ru"):
+        return saved
+    user = getattr(update, "effective_user", None) or getattr(update, "from_user", None)
+    code = getattr(user, "language_code", "") or ""
+    return "ru" if code.lower().startswith("ru") else "uz"
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     HISTORY.pop(update.effective_chat.id, None)
+    ctx.user_data["lang"] = preferred_language(update, ctx)
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Ilovani ochish · Открыть приложение", web_app=WebAppInfo(url=MINI_APP_URL))],
         [InlineKeyboardButton("🇺🇿 Misol savol", callback_data="sample:uz"),
          InlineKeyboardButton("🇷🇺 Пример вопроса", callback_data="sample:ru")],
     ])
-    if WELCOME_IMAGE.exists():
+    if WELCOME_ANIMATION.exists():
+        with WELCOME_ANIMATION.open("rb") as animation:
+            await update.message.reply_animation(animation=animation, caption=WELCOME, reply_markup=buttons)
+    elif WELCOME_IMAGE.exists():
         with WELCOME_IMAGE.open("rb") as photo:
             await update.message.reply_photo(photo=photo, caption=WELCOME, reply_markup=buttons)
     else:
@@ -147,6 +160,36 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await answer_question(msg, ctx, msg.text)
 
+async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Answer Telegram voice notes with the same UZEX data agent."""
+    msg = update.effective_message
+    if not msg:
+        return
+    media = msg.voice or msg.audio
+    if not media:
+        return
+    lang = preferred_language(update, ctx)
+    if getattr(media, "duration", 0) > 45 or (getattr(media, "file_size", 0) or 0) > 2 * 1024 * 1024:
+        notice = ("Ovozli xabar 45 soniyadan va 2 MB dan oshmasin." if lang == "uz" else
+                  "Голосовое сообщение должно быть не длиннее 45 секунд и не больше 2 МБ.")
+        await msg.reply_text(notice)
+        return
+    try:
+        telegram_file = await ctx.bot.get_file(media.file_id)
+        audio_data = bytes(await telegram_file.download_as_bytearray())
+        if len(audio_data) > 2 * 1024 * 1024:
+            notice = ("Ovozli xabar 2 MB dan katta. Qisqaroq xabar yuboring." if lang == "uz" else
+                      "Голосовое сообщение больше 2 МБ. Отправьте запись короче.")
+            await msg.reply_text(notice)
+            return
+        mime_type = getattr(media, "mime_type", None) or ("audio/ogg" if msg.voice else "audio/mpeg")
+        await answer_question(msg, ctx, "", audio_data=audio_data, audio_mime_type=mime_type)
+    except Exception:
+        log.exception("voice message processing failed")
+        notice = ("Ovozli xabarni o‘qib bo‘lmadi. Qayta yuboring yoki savolni yozing." if lang == "uz" else
+                  "Не удалось обработать голосовое сообщение. Отправьте его ещё раз или напишите вопрос.")
+        await msg.reply_text(notice)
+
 async def on_web_app_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.web_app_data:
@@ -161,12 +204,14 @@ async def on_web_app_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await answer_question(msg, ctx, question)
 
-async def answer_question(msg, ctx: ContextTypes.DEFAULT_TYPE, question: str):
+async def answer_question(msg, ctx: ContextTypes.DEFAULT_TYPE, question: str,
+                          audio_data: bytes | None = None, audio_mime_type: str = "audio/ogg"):
     chat_id = msg.chat_id
-    q = question.strip()[:1500]
-    lang = detect_lang(q)
-    ctx.user_data["lang"] = lang
-    status_text = "Savolingiz tekshirilmoqda…" if lang == "uz" else "Проверяю ваш вопрос…"
+    q = question.strip()[:1500] if audio_data is None else "🎙"
+    lang = detect_lang(q) if audio_data is None else preferred_language(msg, ctx)
+    status_text = (("Ovozli savol tahlil qilinmoqda…" if lang == "uz" else "Анализирую голосовой вопрос…")
+                   if audio_data is not None else
+                   ("Savolingiz tekshirilmoqda…" if lang == "uz" else "Проверяю ваш вопрос…"))
     status = await msg.reply_text(status_text)
     lock = LOCKS.setdefault(chat_id, asyncio.Lock())
     async with lock:                       # one question at a time per chat, many chats in parallel
@@ -176,12 +221,16 @@ async def answer_question(msg, ctx: ContextTypes.DEFAULT_TYPE, question: str):
         sqls = []
         try:
             text, HISTORY[chat_id], sqls = await asyncio.wait_for(
-                agent.answer(q, HISTORY.get(chat_id, [])), timeout=65)
+                agent.answer(q, HISTORY.get(chat_id, []), audio_data=audio_data,
+                             audio_mime_type=audio_mime_type), timeout=65)
         except asyncio.TimeoutError:
             text = agent.ERR_MSG
         finally:
             stop.set(); await t
         secs = time.time() - t0
+    if audio_data is not None and text != agent.ERR_MSG:
+        lang = detect_lang(text)
+    ctx.user_data["lang"] = lang
     if text == agent.ERR_MSG:
         text = ("Kechirasiz, texnik xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring." if lang == "uz" else
                 "Извините, произошла техническая ошибка. Попробуйте ещё раз чуть позже.")
@@ -343,6 +392,8 @@ class Page(BaseHTTPRequestHandler):
             "/app.css": (WEB_DIR / "app.css", "text/css; charset=utf-8"),
             "/app.js": (WEB_DIR / "app.js", "application/javascript; charset=utf-8"),
             "/hero.svg": (WEB_DIR / "hero.svg", "image/svg+xml"),
+            "/assistant.css": (WEB_DIR / "assistant.css", "text/css; charset=utf-8"),
+            "/assistant.gif": (WELCOME_ANIMATION, "image/gif"),
             "/welcome.png": (WELCOME_IMAGE, "image/png"),
         }
         item = files.get(path)
@@ -410,14 +461,11 @@ def run_web():
     ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Page).serve_forever()
 
 async def warm(app):
-    """At startup: open the Gemini connection and pick a working model, so the first user is not slow."""
+    """Register the bot UI without making a burst of paid model calls at every restart."""
     global BOT_LOOP
     BOT_LOOP = asyncio.get_running_loop()
     await set_commands(app)
-    try:
-        log.info("warmup:\n%s", await agent.diagnose())
-    except Exception:
-        log.exception("warmup failed")
+    log.info("bot UI ready; Gemini model calls are made only when a user asks a question")
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
@@ -428,6 +476,7 @@ def main():
     app.add_handler(CommandHandler("hide", hide_cmd))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, on_other))
     app.add_error_handler(on_error)

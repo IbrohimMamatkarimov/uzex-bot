@@ -16,3 +16,9 @@ Telegram Mini App:
   On startup, the bot sets its Telegram menu button to open the Mini App. The /start message also has an Open App button and sample questions.
   To register it through BotFather, use /newapp or /setmenubutton and enter the URL above after the updated service is deployed.
   If the Render URL changes, set MINI_APP_URL to the new HTTPS URL ending in /app.
+
+Voice and motion:
+  The Mini App can dictate a question with the browser's speech recognition and read answers aloud with built-in speech synthesis.
+  Telegram accepts voice notes up to 45 seconds; the same Gemini data agent answers them without a separate transcription request.
+  /start uses a looping UZEX assistant animation. UI motion respects the device's reduced-motion preference.
+  Startup no longer probes every Gemini model; diagnostics run only when /test is requested, avoiding needless API quota use.

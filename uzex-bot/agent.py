@@ -279,21 +279,44 @@ async def diagnose() -> str:
 ERR_MSG = ("Kechirasiz, hozir texnik muammo bor. Iltimos, savolni bir ozdan keyin qayta yuboring.\n"
            "Извините, сейчас техническая неполадка. Пожалуйста, повторите вопрос чуть позже.")
 
-async def answer(question: str, history: list) -> tuple[str, list, list]:
+def _user_turn(entry):
+    """Rebuild a text or short voice turn for the model's conversation history."""
+    if isinstance(entry, dict) and entry.get("_voice_bytes"):
+        return types.Content(role="user", parts=[
+            types.Part(text=entry["_voice_prompt"]),
+            types.Part.from_bytes(
+                data=entry["_voice_bytes"],
+                mime_type=entry.get("_voice_mime_type", "audio/ogg")),
+        ])
+    return types.Content(role="user", parts=[types.Part(text=str(entry))])
+
+async def answer(question: str, history: list, audio_data: bytes | None = None,
+                 audio_mime_type: str = "audio/ogg") -> tuple[str, list, list]:
     """history: list of (user_text, model_text). Returns (answer, new_history, sql_queries_used)."""
     global _SYSTEM
     if _SYSTEM is None:
         _SYSTEM = build_system_prompt()
     ckey = re.sub(r"\s+", " ", question.strip().lower())
-    if not history and ckey in _CACHE:               # data never changes -> reuse the answer
+    if audio_data is None and not history and ckey in _CACHE:  # data never changes -> reuse the answer
         text, trace = _CACHE[ckey]
         log.info("cache hit")
         return text, [(question, text)], list(trace)
     contents = []
     for u, m in history[-4:]:
-        contents.append(types.Content(role="user", parts=[types.Part(text=u)]))
+        contents.append(_user_turn(u))
         contents.append(types.Content(role="model", parts=[types.Part(text=m)]))
-    contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
+    if audio_data is not None:
+        voice_prompt = (
+            "Listen to this voice message as the user's latest question. It may be in Uzbek or Russian. "
+            "Answer the question directly in the same language, using the UZEX registry and SQL tool when needed. "
+            "Do not translate or summarize the recording. If it is unclear, ask the user to repeat it."
+        )
+        user_turn = {"_voice_bytes": audio_data, "_voice_mime_type": audio_mime_type,
+                     "_voice_prompt": voice_prompt}
+        contents.append(_user_turn(user_turn))
+    else:
+        user_turn = question
+        contents.append(_user_turn(question))
     text = ""
     trace = []
     try:
@@ -330,9 +353,10 @@ async def answer(question: str, history: list) -> tuple[str, list, list]:
         return ERR_MSG, history, []
     if not text:
         return ERR_MSG, history, []
-    text = _localize_commodity_names(text, question)
-    if not history and trace:
+    # For audio input, infer output language from the actual answer before localizing names.
+    text = _localize_commodity_names(text, text if audio_data is not None else question)
+    if audio_data is None and not history and trace:
         _CACHE[ckey] = (text, list(trace))
         while len(_CACHE) > 200:
             _CACHE.popitem(last=False)
-    return text, (history + [(question, text)])[-6:], trace
+    return text, (history + [(user_turn, text)])[-6:], trace

@@ -7,6 +7,7 @@
   <title>UZEX Bitimlar AI</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/assistant.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -21,6 +22,15 @@
 
     <section class="hero">
       <img class="hero-art" src="/hero.svg" alt="">
+      <div class="assistant-buddy" aria-hidden="true">
+        <span class="buddy-orbit orbit-one"></span><span class="buddy-orbit orbit-two"></span>
+        <div class="buddy-shell">
+          <span class="buddy-antenna"></span><span class="buddy-eye eye-left"></span>
+          <span class="buddy-eye eye-right"></span><span class="buddy-smile"></span>
+          <span class="buddy-cheek cheek-left"></span><span class="buddy-cheek cheek-right"></span>
+        </div>
+        <div class="buddy-label"><strong>UZEX AI</strong><span data-i18n="assistantStatus">Yordamga tayyorman</span></div>
+      </div>
       <div class="hero-copy">
         <span class="eyebrow" data-i18n="eyebrow">BIRJA REYESTRI · 2022–2026</span>
         <h1 data-i18n="title">Savol bering.<br>Raqamlar bilan javob oling.</h1>
@@ -31,7 +41,13 @@
 
     <section class="ask card">
       <label for="question" data-i18n="askLabel">Savolingiz</label>
-      <textarea id="question" rows="3" maxlength="1500" data-i18n-placeholder="placeholder" placeholder="Masalan: 2025-yilda eng ko‘p bitim tuzgan 5 ta xaridor kim?"></textarea>
+      <div class="composer">
+        <textarea id="question" rows="3" maxlength="1500" data-i18n-placeholder="placeholder" placeholder="Masalan: 2025-yilda eng ko‘p bitim tuzgan 5 ta xaridor kim?"></textarea>
+        <button id="voice" class="voice-button" type="button" aria-pressed="false" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11.5a7 7 0 0 1-14 0M12 18.5V22m-4 0h8"/></svg>
+        </button>
+      </div>
+      <p id="voiceStatus" class="voice-status" role="status" aria-live="polite" hidden></p>
       <div class="ask-bottom"><span class="hint" data-i18n="hint">Natijalar manba va hisob-kitob bilan beriladi</span><button id="send" class="send" type="button"><span data-i18n="send">Javob olish</span><b>→</b></button></div>
     </section>
 
@@ -41,7 +57,7 @@
     </section>
 
     <section id="result" class="result card" hidden>
-      <div class="result-head"><span class="result-icon">✦</span><div><span class="eyebrow" data-i18n="answer">JAVOB</span><div id="elapsed" class="elapsed"></div></div></div>
+      <div class="result-head"><span class="result-icon">✦</span><div class="result-title"><span class="eyebrow" data-i18n="answer">JAVOB</span><div id="elapsed" class="elapsed"></div></div><button id="speak" class="speak-button" type="button"><span aria-hidden="true">🔊</span><span data-i18n="listen">Javobni tinglash</span></button></div>
       <pre id="answer"></pre>
       <div class="result-foot"><span>✓</span><span data-i18n="verified">Reyestr ma’lumotlari asosida</span></div>
     </section>

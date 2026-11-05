@@ -1,0 +1,39 @@
+.assistant-buddy{position:absolute;z-index:1;top:22px;right:30px;width:124px;height:118px;display:grid;place-items:center;animation:buddy-float 4.2s ease-in-out infinite;filter:drop-shadow(0 14px 26px #03091d80)}
+.buddy-shell{position:relative;width:78px;height:78px;border-radius:29px 29px 34px 34px;background:radial-gradient(circle at 30% 23%,#d7fff6 0 3%,#72f4df 10%,#23b8cf 49%,#4168df 100%);box-shadow:inset 4px 5px 13px #fff9,inset -9px -12px 20px #17276880,0 0 34px #38e8d966;transform:rotate(-4deg);animation:buddy-tilt 6s ease-in-out infinite}
+.buddy-shell:after{content:"";position:absolute;left:15px;right:15px;top:15px;height:8px;border-radius:50%;background:#fff9;filter:blur(4px)}
+.buddy-antenna{position:absolute;width:3px;height:17px;left:38px;top:-13px;border-radius:4px;background:linear-gradient(#36eb9a,#6bd9fa)}
+.buddy-antenna:after{content:"";position:absolute;width:9px;height:9px;top:-5px;left:-3px;border-radius:50%;background:#36eb9a;box-shadow:0 0 13px #36eb9a;animation:antenna-pulse 1.8s ease-in-out infinite}
+.buddy-eye{position:absolute;z-index:2;top:31px;width:8px;height:10px;border-radius:50%;background:#09234d;box-shadow:0 0 0 3px #d8fff629;animation:buddy-blink 5s infinite}
+.eye-left{left:23px}.eye-right{right:23px}
+.buddy-smile{position:absolute;left:31px;top:48px;width:17px;height:8px;border-bottom:2px solid #07335b;border-radius:0 0 14px 14px;opacity:.9}
+.buddy-cheek{position:absolute;top:45px;width:8px;height:4px;border-radius:50%;background:#b1fff0a8;filter:blur(1px)}
+.cheek-left{left:12px}.cheek-right{right:12px}
+.buddy-orbit{position:absolute;width:120px;height:42px;border:1px solid #a2c7ff45;border-radius:50%;transform:rotate(-25deg);animation:orbit-spin 10s linear infinite}
+.orbit-two{width:108px;height:55px;border-color:#39e99952;transform:rotate(47deg);animation-duration:13s;animation-direction:reverse}
+.buddy-label{position:absolute;left:50%;bottom:-11px;display:flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid #a9c1ff28;border-radius:999px;background:#101a3ee8;white-space:nowrap;transform:translateX(-50%);box-shadow:0 5px 18px #03091d55}
+.buddy-label strong{font-size:8px;letter-spacing:.09em;color:#49edaa}.buddy-label span{font-size:8px;color:#bdcaec}
+.hero-copy{max-width:450px}.hero-art{opacity:.72}
+.topbar{animation:section-rise .45s .02s both}.hero{animation:section-rise .55s .08s both}.ask{animation:section-rise .55s .16s both}.examples{animation:section-rise .55s .24s both}.result:not([hidden]){animation:section-rise .35s ease-out both}footer{animation:section-rise .55s .3s both}
+.composer{display:flex;align-items:center;gap:10px}.composer textarea{flex:1;width:0;min-width:0}
+.voice-button{position:relative;flex:0 0 48px;width:48px;height:48px;display:grid;place-items:center;border:1px solid #8fafff35;border-radius:16px;background:linear-gradient(145deg,#1a2855,#111b42);color:#a8bbff;cursor:pointer;transition:background .2s,transform .2s,color .2s;overflow:visible}
+.voice-button[hidden]{display:none}.voice-button svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.voice-button:hover{transform:translateY(-2px);color:#39eca0;border-color:#39eca080}.voice-button.is-listening{background:#1b3d4c;color:#48f0a5;border-color:#48f0a5;animation:mic-beat .9s ease-in-out infinite}
+.voice-button.is-listening:after{content:"";position:absolute;inset:-6px;border:1px solid #48f0a57a;border-radius:20px;animation:mic-ring 1.3s ease-out infinite}
+.voice-status{margin:8px 2px 0;color:#9ff5cb;font-size:11px;line-height:1.4}.voice-status[hidden]{display:none}
+.result-head{gap:11px}.result-title{flex:1}.speak-button{display:flex;align-items:center;gap:7px;border:1px solid #7e97de35;border-radius:999px;padding:8px 11px;background:#172348;color:#dbe5ff;font-size:11px;font-weight:700;cursor:pointer;transition:transform .18s,border-color .18s,color .18s}
+.speak-button:hover,.speak-button.is-speaking{transform:translateY(-1px);border-color:#39e9999c;color:#63f5b1}.speak-button>span:first-child{display:inline-block;animation:speaker-bob 1.6s ease-in-out infinite}
+.send b{display:inline-block;transition:transform .2s}.send:hover b{transform:translateX(4px)}.result-icon{animation:spark-turn 8s linear infinite}
+.question{position:relative;overflow:hidden}.question:after{content:"";position:absolute;inset:-120% auto -120% -35%;width:28%;transform:rotate(22deg);background:linear-gradient(90deg,transparent,#ffffff12,transparent);transition:left .5s}.question:hover:after{left:115%}
+.is-thinking .assistant-buddy{animation-duration:1.25s}.is-thinking .buddy-shell{box-shadow:inset 4px 5px 13px #fff9,inset -9px -12px 20px #17276880,0 0 46px #38e8d9a6}.is-thinking .buddy-antenna:after{animation-duration:.55s}
+@keyframes section-rise{from{opacity:0;translate:0 10px}to{opacity:1;translate:0 0}}
+@keyframes buddy-float{0%,100%{translate:0 0}50%{translate:0 -8px}}
+@keyframes buddy-tilt{0%,100%{rotate:-4deg}50%{rotate:4deg}}
+@keyframes buddy-blink{0%,44%,48%,100%{transform:scaleY(1)}46%{transform:scaleY(.12)}}
+@keyframes antenna-pulse{0%,100%{scale:.85;opacity:.7}50%{scale:1.25;opacity:1}}
+@keyframes orbit-spin{to{rotate:335deg}}
+@keyframes mic-beat{0%,100%{scale:1}50%{scale:1.06}}
+@keyframes mic-ring{0%{scale:.85;opacity:.8}100%{scale:1.38;opacity:0}}
+@keyframes speaker-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+@keyframes spark-turn{to{rotate:360deg}}
+@media(max-width:560px){.hero{min-height:350px;padding-top:104px}.assistant-buddy{width:86px;height:88px;top:8px;right:23px}.buddy-shell{width:58px;height:58px;border-radius:22px 22px 26px 26px}.buddy-antenna{left:28px;height:12px;top:-10px}.buddy-eye{top:23px;width:6px;height:8px}.eye-left{left:17px}.eye-right{right:17px}.buddy-smile{left:23px;top:36px;width:13px}.buddy-cheek{top:34px;width:6px}.cheek-left{left:9px}.cheek-right{right:9px}.buddy-orbit{width:84px;height:31px}.orbit-two{width:79px;height:40px}.buddy-label{bottom:-7px;padding:4px 7px;gap:4px}.buddy-label strong,.buddy-label span{font-size:7px}.hero-art{top:8px;height:88%;right:-66px;width:64%;opacity:.42}.speak-button{padding:8px 9px;font-size:10px}.speak-button>span:first-child{font-size:14px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
