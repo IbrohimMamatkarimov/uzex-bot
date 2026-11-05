@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" fill="none">
+  <defs>
+    <linearGradient id="g" x1="140" y1="50" x2="600" y2="400" gradientUnits="userSpaceOnUse"><stop stop-color="#2ee98b"/><stop offset="1" stop-color="#4d6fe0"/></linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="32"/></filter>
+  </defs>
+  <circle cx="480" cy="195" r="170" fill="#2ee98b" opacity=".18" filter="url(#blur)"/>
+  <path d="M360-30h430v270L650 355 335 280z" fill="#253c91"/>
+  <path d="M360-30h430L744 119 355 63z" fill="#00b975"/>
+  <path d="m355 63 389 56-44 198-365-80z" fill="url(#g)"/>
+  <path d="m335 237 364 80-49 84-315-75z" fill="#5577e8"/>
+  <g fill="#9bb1ff" opacity=".6">
+    <rect x="390" y="345" width="14" height="14" rx="3"/><rect x="411" y="345" width="14" height="14" rx="3"/>
+    <rect x="432" y="345" width="14" height="14" rx="3"/><rect x="453" y="345" width="14" height="14" rx="3"/>
+    <rect x="474" y="345" width="14" height="14" rx="3"/><rect x="495" y="345" width="14" height="14" rx="3"/>
+    <rect x="516" y="345" width="14" height="14" rx="3"/><rect x="537" y="345" width="14" height="14" rx="3"/>
+  </g>
+</svg>
