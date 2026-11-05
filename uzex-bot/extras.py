@@ -176,6 +176,8 @@ def _write_sheet(ws, cols, rows, lang):
     ws.row_dimensions[1].height = 32
     for i, r in enumerate(rows, 2):
         for j, v in enumerate(r, 1):
+            if lang != "ru" and str(cols[j - 1]).lower() == "commodity" and isinstance(v, str):
+                v = agent.COMMODITY_UZ.get(v, v)
             v = _clean(v)
             cell = ws.cell(row=i, column=j, value=v)
             if i % 2 == 0:
@@ -320,4 +322,3 @@ def source_text(sqls, lang="uz"):
     head = "Ответ основан на этих SQL-запросах к реестру:" if lang == "ru" else "Javob quyidagi SQL so‘rovlarga asoslangan:"
     body = "\n\n".join(f"{i}) {q}" for i, q in enumerate(sqls[:5], 1))
     return f"{head}\n\n{body}"[:3900]
-
